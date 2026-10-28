@@ -16,7 +16,7 @@
 B=`basename $0 .sh`
 cd `dirname $0`
 source ./rungraphd
-GLD=../../gld/gld
+GLD=${GLD:-../../gld/gld}
 
 rm -f dateline5.out1
 rm -f dateline5.out2

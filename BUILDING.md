@@ -46,6 +46,30 @@ If you add or remove a source file, update both.
 
 Tested on macOS (Apple Silicon, Apple clang 21).
 
+## Testing
+
+    make -j8 test
+
+This builds graphd plus the `gld` and `gpush` clients (`make tools`
+builds just those two), runs the `libcm` unit test, and runs every
+case in `test/unit`. A full run takes a minute or two with the
+default of 8 parallel jobs; set `TEST_JOBS` to change that. To run
+only some cases, name them:
+
+    make test TESTS="anchor restore-v2"
+
+Each case `X` is a shell script `test/unit/X.sh` that feeds requests to
+graphd, with its expected stdout in `X.out.exp` (and stderr, if any,
+in `X.err.exp`). The cases run in a scratch copy of `test/unit` under
+`out/test-unit/`, which is kept so you can look at the `X.out`, `X.err`
+and `X.log` files of a failed case. A few cases start a graphd server
+on a fixed TCP port (8102, 8111, 12345, 47276, 54321); those run one at
+a time after the rest, and the ports need to be free.
+
+To add a case, write `X.sh` following an existing one, run it with
+`make test TESTS=X`, check `out/test-unit/test/unit/X.out` by hand, and
+copy it to `test/unit/X.out.exp`.
+
 ## Running graphd
 
 Interactive mode reads requests from stdin and writes responses to

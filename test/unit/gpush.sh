@@ -27,7 +27,7 @@ rungraphd -i tcp::8102 -d${D} -p ${D}.pid
 # terminate successfully only if the socket to graphd didn't become
 # readable for 10 (-w 10) seconds.
 
-if ../../util/gpush -s tcp::8102 -n 10000000 -w 10 -z
+if ${GPUSH:-../../util/gpush} -s tcp::8102 -n 10000000 -w 10 -z
 then
 	echo gpush: ok
 else

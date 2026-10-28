@@ -30,7 +30,7 @@ GFLAGS=${GFLAGS-"-voperator-error"}
 #   	run graphd
 #
 
-GRAPHD=../../graphd/graphd
+GRAPHD=${GRAPHD:-../../graphd/graphd}
 
 function rungraphd ()
 {

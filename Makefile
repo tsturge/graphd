@@ -397,20 +397,90 @@ GRAPHD_SRCS = \
 	graphd/graphd-writethrough.c \
 	graphd/graphd-xstate.c
 
+LIBGRAPHDB_SRCS = \
+	libgraphdb/graphdb-address.c \
+	libgraphdb/graphdb-args.c \
+	libgraphdb/graphdb-buffer-alloc.c \
+	libgraphdb/graphdb-buffer-dup.c \
+	libgraphdb/graphdb-buffer-format.c \
+	libgraphdb/graphdb-buffer-free.c \
+	libgraphdb/graphdb-build-version.c \
+	libgraphdb/graphdb-connect.c \
+	libgraphdb/graphdb-connection-drop.c \
+	libgraphdb/graphdb-create.c \
+	libgraphdb/graphdb-descriptor.c \
+	libgraphdb/graphdb-destroy.c \
+	libgraphdb/graphdb-heap.c \
+	libgraphdb/graphdb-initialize.c \
+	libgraphdb/graphdb-iterator.c \
+	libgraphdb/graphdb-log.c \
+	libgraphdb/graphdb-query.c \
+	libgraphdb/graphdb-reconnect-async.c \
+	libgraphdb/graphdb-request-alloc.c \
+	libgraphdb/graphdb-request-cancel.c \
+	libgraphdb/graphdb-request-chain.c \
+	libgraphdb/graphdb-request-free.c \
+	libgraphdb/graphdb-request-io.c \
+	libgraphdb/graphdb-request-lookup.c \
+	libgraphdb/graphdb-request-send.c \
+	libgraphdb/graphdb-request-wait.c \
+	libgraphdb/graphdb-server-error.c \
+	libgraphdb/graphdb-server-name.c \
+	libgraphdb/graphdb-set-logging.c \
+	libgraphdb/graphdb-set-loglevel.c \
+	libgraphdb/graphdb-set-memory.c \
+	libgraphdb/graphdb-set-reply-callback.c \
+	libgraphdb/graphdb-strerror.c \
+	libgraphdb/graphdb-time.c \
+	libgraphdb/graphdb-token.c \
+	libgraphdb/graphdb-transaction-id.c
+
 SRCS = $(LIBCL_SRCS) $(LIBCM_SRCS) $(LIBES_SRCS) $(LIBGRAPH_SRCS) $(LIBADDB_SRCS) $(LIBPDB_SRCS) $(LIBSRV_SRCS) $(LIBGDP_SRCS) $(GRAPHD_SRCS)
 OBJS = $(SRCS:%.c=$(BUILDDIR)/%.o)
-DEPS = $(OBJS:.o=.d)
 
-.PHONY: all clean
+# gld and gpush are graphd clients used by some of the tests.
+CLIENT_LIB_SRCS = $(LIBCL_SRCS) $(LIBCM_SRCS) $(LIBGRAPH_SRCS) $(LIBGRAPHDB_SRCS)
+CLIENT_LIB_OBJS = $(CLIENT_LIB_SRCS:%.c=$(BUILDDIR)/%.o)
+GLD_OBJS = $(addprefix $(BUILDDIR)/gld/,gld.o gld-primitive.o gld-request.o gld-var.o)
+GPUSH_OBJS = $(BUILDDIR)/util/gpush.o
+CM_TEST_OBJS = $(BUILDDIR)/libcm/cm-test.o $(LIBCM_SRCS:%.c=$(BUILDDIR)/%.o)
+
+ALL_OBJS = $(sort $(OBJS) $(CLIENT_LIB_OBJS) $(GLD_OBJS) $(GPUSH_OBJS) $(CM_TEST_OBJS))
+DEPS = $(ALL_OBJS:.o=.d)
+
+# Parallel jobs for "make test".
+TEST_JOBS ?= 8
+
+.PHONY: all tools test clean
 all: $(BUILDDIR)/bin/graphd
 
+tools: $(BUILDDIR)/bin/gld $(BUILDDIR)/bin/gpush
+
 $(BUILDDIR)/bin/graphd: $(OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILDDIR)/bin/gld: $(GLD_OBJS) $(CLIENT_LIB_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILDDIR)/bin/gpush: $(GPUSH_OBJS) $(CLIENT_LIB_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILDDIR)/bin/cm-test: $(CM_TEST_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 $(BUILDDIR)/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c -o $@ $<
+
+# Run the libcm unit test and the graphd test/unit suite.
+# TESTS="anchor sort" runs only those cases.
+test: $(BUILDDIR)/bin/graphd $(BUILDDIR)/bin/gld $(BUILDDIR)/bin/gpush $(BUILDDIR)/bin/cm-test
+	$(BUILDDIR)/bin/cm-test
+	BUILDDIR=$(abspath $(BUILDDIR)) JOBS=$(TEST_JOBS) test/run-tests.sh $(TESTS)
 
 clean:
 	rm -rf $(BUILDDIR)

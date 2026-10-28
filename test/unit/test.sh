@@ -67,7 +67,7 @@ function test_case() {
     verbose_log "$(cat $b.err)"
     verbose_log "---end error output"
     if [ -s "$b.err.exp" ]; then
-      egrep -v "(^Stacktrace)|(^$)" $b.err > $b.err.clean
+      egrep -v "(^Stacktrace)|(^$)|(^addb_largefile_set_maxlf: not setting fd limit)" $b.err > $b.err.clean
       egrep -v "(^Stacktrace)|(^$)" $b.err.exp > $b.err.exp.clean
       if ! cmp -s "$b.err.clean" "$b.err.exp.clean"; then
         error "$b: changed error output:"
