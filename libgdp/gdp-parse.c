@@ -2591,6 +2591,11 @@ static int parse_record(gdp_context *ctx, unsigned char version,
   gdp_record rec;
   int err;
 
+  /* Fields the record's version lacks (txstart before version 6)
+   * must still read as false/null, not as stack garbage.
+   */
+  memset(&rec, 0, sizeof rec);
+
   // `('
   if ((err = match(ctx, TOK_OPAR, &tok))) goto fail_OPAR;
 
