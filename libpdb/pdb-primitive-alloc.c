@@ -401,7 +401,7 @@ int pdb_primitive_alloc_commit(pdb_handle* pdb, pdb_guid const* prev_guid,
            "pdb_primitive_alloc_commit: attempt "
            "to write internally inconsistent record: %s",
            errstr);
-    except_throw(err);
+    except_throw(PDB_ERR_DATABASE);
   }
 
   pdb_primitive_guid_get(pr, guid);
@@ -425,7 +425,7 @@ int pdb_primitive_alloc_commit(pdb_handle* pdb, pdb_guid const* prev_guid,
              graph_guid_to_string(my_guid, buf2, sizeof buf2),
              graph_guid_to_string(&guid, buf3, sizeof buf3),
              (unsigned long long)GRAPH_GUID_DB(guid));
-      except_throw(err);
+      except_throw(PDB_ERR_EXISTS);
     }
 
     /*  We're importing.  Make sure that the
