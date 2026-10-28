@@ -280,7 +280,7 @@ int main(int argc, char **argv) {
 
   if (verbose) graphdb_set_loglevel(gpush.gpush_graphdb, CL_LEVEL_VERBOSE);
 
-  err = graphdb_connect(gpush.gpush_graphdb, 0, server_address, 0);
+  err = graphdb_connect(gpush.gpush_graphdb, GRAPHDB_INFINITY, server_address, 0);
   if (err != 0) {
     fprintf(stderr, "%s: cannot connect to %s: %s\n", gpush.gpush_progname,
             server_address[0], graphdb_strerror(err, ebuf, sizeof ebuf));
