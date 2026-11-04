@@ -1298,6 +1298,7 @@ struct graphd_constraint {
    *  it isn't, or hasn't been looked at (con_path_route_known).
    */
   unsigned int con_path_route_known : 1;
+  unsigned int con_sort_default_path : 1; /* sort=(steps guid) implied */
   graphd_constraint **con_path_route;
   size_t con_path_route_n;
 

@@ -3,7 +3,11 @@
 # Authors and papers: 40 authors, 60 papers with 1 to 4 authors each,
 #   chosen at random (seed 7), with "author" links from paper to author,
 #   and two more papers by a0 and a11. Authors a35 to a39 write only with
-#   each other.
+#   each other. a7, a20 and a33 have the value "award".
+#
+#   Matches picked by a constraint that only a few nodes meet (value=)
+#   are searched for from both ends, one at a time; a page of the
+#   nearest matches stops the search once it is found.
 #
 #   Shortest co-author paths, through the papers in between; each step's
 #   "via" lists every paper the two share.
@@ -24,7 +28,7 @@ rungraphd -d${D} -bty <<-'EOF'
 	write (name="a4")
 	write (name="a5")
 	write (name="a6")
-	write (name="a7")
+	write (name="a7" value="award")
 	write (name="a8")
 	write (name="a9")
 	write (name="a10")
@@ -37,7 +41,7 @@ rungraphd -d${D} -bty <<-'EOF'
 	write (name="a17")
 	write (name="a18")
 	write (name="a19")
-	write (name="a20")
+	write (name="a20" value="award")
 	write (name="a21")
 	write (name="a22")
 	write (name="a23")
@@ -50,7 +54,7 @@ rungraphd -d${D} -bty <<-'EOF'
 	write (name="a30")
 	write (name="a31")
 	write (name="a32")
-	write (name="a33")
+	write (name="a33" value="award")
 	write (name="a34")
 	write (name="a35")
 	write (name="a36")
@@ -268,6 +272,13 @@ rungraphd -d${D} -bty <<-'EOF'
 	read (guid=00000012400034568000000000000001 result=((name contents)) (<-path step=(result=(contents) (<-right typeguid=00000012400034568000000000000000 result=((contents)) left->(result=((name)) (<-left typeguid=00000012400034568000000000000000 result=none right->(*))))) guid=0000001240003456800000000000000c result=((name path-count (path via)))))
 	read (guid=00000012400034568000000000000001 result=((name contents)) (<-path step=(result=(contents) (<-right typeguid=00000012400034568000000000000000 result=((contents)) left->(result=((name)) (<-left typeguid=00000012400034568000000000000000 result=none right->(*))))) guid=00000012400034568000000000000025 result=((name path via steps))))
 	read (guid=(00000012400034568000000000000005 0000001240003456800000000000000a 00000012400034568000000000000025) result=((name contents)) (<-path step=(result=(contents) (<-right typeguid=00000012400034568000000000000000 result=((contents)) left->(result=((name)) (<-left typeguid=00000012400034568000000000000000 result=none right->(*))))) guid=00000012400034568000000000000016 optional result=((name path-count (path)))))
+	read (guid=00000012400034568000000000000001 result=((name contents)) (<-path step=(result=(contents) (<-right typeguid=00000012400034568000000000000000 result=((contents)) left->(result=((name)) (<-left typeguid=00000012400034568000000000000000 result=none right->(*))))) value="award" result=((name steps path-count (path via)))))
+	read (guid=00000012400034568000000000000001 result=((name contents)) (<-path step=(result=(contents) (<-right typeguid=00000012400034568000000000000000 result=((contents)) left->(result=((name)) (<-left typeguid=00000012400034568000000000000000 result=none right->(*))))) value="award" pagesize=1 result=((name steps path))))
+	read (guid=00000012400034568000000000000025 result=((name contents)) (<-path step=(result=(contents) (<-right typeguid=00000012400034568000000000000000 result=((contents)) left->(result=((name)) (<-left typeguid=00000012400034568000000000000000 result=none right->(*))))) value="award" result=((name path via steps))))
+	read (guid=(00000012400034568000000000000008 00000012400034568000000000000025) result=((name contents)) (<-path step=(result=(contents) (<-right typeguid=00000012400034568000000000000000 result=((contents)) left->(result=((name)) (<-left typeguid=00000012400034568000000000000000 result=none right->(*))))) value="award" optional result=((name steps path-count))))
+	read (guid=00000012400034568000000000000001 result=((name contents)) (<-path step=(result=(contents) (<-right typeguid=00000012400034568000000000000000 result=((contents)) left->(result=((name)) (<-left typeguid=00000012400034568000000000000000 result=none right->(*))))) pagesize=3 result=((name steps path))))
+	read (guid=00000012400034568000000000000001 result=((name contents)) (<-path step=(result=(contents) (<-right typeguid=00000012400034568000000000000000 result=((contents)) left->(result=((name)) (<-left typeguid=00000012400034568000000000000000 result=none right->(*))))) steps>=2 pagesize=2 result=((name steps))))
+	read (guid=00000012400034568000000000000001 result=((name contents)) (<-path step=(result=(contents) (<-right typeguid=00000012400034568000000000000000 result=((contents)) left->(result=((name)) (<-left typeguid=00000012400034568000000000000000 result=none right->(*))))) (<-right typeguid=00000012400034568000000000000000) pagesize=2 result=((name steps))))
 	read (guid=00000012400034568000000000000001 result=((name contents)) (<-path step=(result=(contents) (<-right typeguid=00000012400034568000000000000000 result=((contents)) left->(result=((name)) (<-left typeguid=00000012400034568000000000000000 result=none right->(*))))) name="a7" result=((name path-count (path via)))))
 	read (guid=00000012400034568000000000000001 result=((name contents)) (<-path step=(result=(contents) (<-right typeguid=00000012400034568000000000000000 result=((contents)) left->(result=((name)) (<-left typeguid=00000012400034568000000000000000 result=none right->(*))))) name="a7" pathlimit=2 result=((name path-count (path via steps)))))
 	read (guid=00000012400034568000000000000001 result=((name contents)) (<-path step=(result=(contents) (<-right typeguid=00000012400034568000000000000000 result=((contents)) left->(result=((name)) (<-left typeguid=00000012400034568000000000000000 result=none right->(*))))) steps=3 pagesize=4 pathlimit=all result=(count (name path-count (path)))))

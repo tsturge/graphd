@@ -1,9 +1,10 @@
 # Path search in graphd: a proposal
 
-Status (branch `path-search`): implemented, searching from one end or,
-for a single named match and a chain-shaped step, from both
-(`graphd/graphd-read-path.c`); resuming a search with a cursor, and
-MQL, are still to come.
+Status (branch `path-search`): implemented (`graphd/graphd-read-path.c`),
+searching from both ends when the step is a chain and only a few nodes
+can match, and otherwise from one end, stopping early when a page of
+the nearest matches is all the results need. Resuming a search with a
+cursor, and MQL, are still to come.
 
 ## Why
 
@@ -206,10 +207,20 @@ paths.
 - **Several starts.** When the parent matches several nodes, each has
   its own matches, as with any subconstraint; a start with no matches
   drops out unless the `<-path` constraint is `optional`.
-- **Both ends.** When the `<-path` constraint has a single `guid=` and
-  the step is a chain (below), graphd searches from both ends at once:
-  a chain is followed backwards by flipping each linkage. That changes
-  only the cost, not the answer.
+- **Both ends.** When the step is a chain (below) and the `<-path`
+  constraint can match only a few nodes - it names them with `guid=`,
+  or graphd's own iterator for it holds at most 64, as with a name, an
+  indexed value, or "the authors of this paper" - graphd searches from
+  both ends at once, from the start and from each of those nodes in
+  turn: a chain is followed backwards by flipping each linkage. That
+  changes only the cost, not the answer.
+- **Stopping early.** Otherwise the search goes from one end. If the
+  results are just a page of the nearest matches - an explicit
+  `pagesize`, the default order, no cursor, and no subconstraints on
+  the `<-path` constraint to rule matches out later - it stops at the
+  end of the first level by which it has found a page. With none of
+  these, a search with no `steps<=N` walks everything reachable from
+  the start, which on a large graph can take minutes: give it a bound.
 - **Limits.** The request's cost allowance (`cost="tu=..."`) bounds the
   search; past it, the read fails with `TOOHARD`, as any other read
   would. `steps<=N` bounds the depth.
@@ -319,14 +330,17 @@ since evaluation was implemented.
   evaluates the `<-path` constraint as an ordinary read-set over the
   nodes reached, with an implicit `sort=(steps guid)`, so its own
   constraints, paging, sort and count work as for any constraint.
-- **Both ends.** With a single `guid=B` and a chain, the search grows
-  whichever side has the smaller frontier, a level at a time, until one
-  side reaches a node the other has. Then it puts together the shortest
-  paths from the start to B: a node within the forward search's radius
-  has the predecessors that search found; one beyond it has those the
-  backward search found one step further back, if they in turn reach
-  the start at the right distance. These replace the forward search's
-  nodes, and the rest is as for one end.
+- **Both ends.** With a chain and a few possible matches, the search
+  takes each in turn: a search back from it and the (shared) search
+  from the start grow whichever has the smaller frontier, a level at a
+  time, until one reaches a node the other has. Then it puts together
+  the shortest paths from the start to that match: a node within the
+  forward search's radius has the predecessors that search found; one
+  beyond it has those the backward search found one step further back,
+  if they in turn reach the start at the right distance. A node on
+  paths to several matches has the same predecessors in each. When all
+  are done, the paths found replace the forward search's nodes, and the
+  rest is as for one end.
 - **Results.** `path`, `steps`, `path-count` and lists of paths are
   computed from the search's state (`graphd_read_path_value()`); a list
   of paths is turned into a single pattern atom, so the rest of graphd
@@ -355,7 +369,9 @@ since evaluation was implemented.
 4. Both ends (done, for chain-shaped steps): between the same dblp
    authors, 0.6 s with a cold cache, 0.1-0.2 s warm (Stonebraker to
    Knuth: 133 s from one end; 158 thousand primitives read instead of
-   74 million).
+   74 million). To all eight authors of one paper, from authors two to
+   four steps away, 0.9-2.6 s; to the nearest of them, 0.2-0.3 s; the
+   three nearest people, a page stopped early, 0.01 s.
 5. MQL: expose paths, perhaps as
    `"/type/reflect/path": {"via": P, "to": Q, "target": {...}}`,
    compiled to the template above. A separate design pass.

@@ -561,7 +561,11 @@ def coauthor_tests():
   """Authors and papers: 40 authors, 60 papers with 1 to 4 authors each,
   chosen at random (seed 7), with "author" links from paper to author,
   and two more papers by a0 and a11. Authors a35 to a39 write only with
-  each other.
+  each other. a7, a20 and a33 have the value "award".
+
+  Matches picked by a constraint that only a few nodes meet (value=)
+  are searched for from both ends, one at a time; a page of the
+  nearest matches stops the search once it is found.
 
   Shortest co-author paths, through the papers in between; each step's
   "via" lists every paper the two share.
@@ -570,7 +574,7 @@ def coauthor_tests():
   m = Model()
   m.node('author')
   for i in range(40):
-    m.node('a%d' % i)
+    m.node('a%d' % i, value='award' if i in (7, 20, 33) else None)
   for p in range(60):
     pool = range(35, 40) if p >= 54 else range(35)
     authors = rnd.sample(list(pool), rnd.choice([1, 1, 2, 2, 2, 3, 4]))
@@ -617,6 +621,27 @@ def coauthor_tests():
       Query(['a0'], co, by_guid(m, 'a36')),
       Query(['a4', 'a9', 'a36'], co, by_guid(m, 'a21'), optional=True,
             result=('name', 'path-count', ('path',))),
+      # Award holders: a few, found through the value index.
+      Query(['a0'], co, ('value="award"',
+                         lambda m, y: m.nodes[y]['value'] == 'award'),
+            result=('name', 'steps', 'path-count', ('path', 'via'))),
+      Query(['a0'], co, ('value="award"',
+                         lambda m, y: m.nodes[y]['value'] == 'award'),
+            pagesize=1, result=('name', 'steps', 'path')),
+      Query(['a36'], co, ('value="award"',
+                          lambda m, y: m.nodes[y]['value'] == 'award')),
+      Query(['a7', 'a36'], co, ('value="award"',
+                                lambda m, y: m.nodes[y]['value'] == 'award'),
+            optional=True, result=('name', 'steps', 'path-count')),
+      # A page of the nearest, picked by nothing indexed.
+      Query(['a0'], co, pagesize=3, result=('name', 'steps', 'path')),
+      Query(['a0'], co, steps=[('>=', 2)], pagesize=2,
+            result=('name', 'steps')),
+      Query(['a0'], co, ('(<-right typeguid=%s)' % m.g('author'),
+                         lambda m, y: any(l['right'] == y and
+                                          l['type'] == 'author'
+                                          for l in m.live())),
+            pagesize=2, result=('name', 'steps')),
       # Several shortest paths.
       Query(['a0'], co, name(farthest[0]),
             result=('name', 'path-count', ('path', 'via'))),
