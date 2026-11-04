@@ -27,8 +27,8 @@ a built graphd:
 
   test/path/make-tests.py [--graphd out/bin/graphd]
 
-It writes the tests and lists them in test/unit/pending: they fail until
-path search is implemented.
+It writes the tests: test/unit/path-tree, path-coauthor, path-grid and
+path-semantics.
 """
 
 import argparse
@@ -658,6 +658,9 @@ def grid_tests():
       Query(['g0-0'], both, result='count'),
       Query(['g4-4'], both, steps=[('=', 3)], result='count'),
       Query(['g4-4'], both, pagesize=6, result=('name', 'steps')),
+      # A match named by guid=, among others as near.
+      Query(['g0-0'], both, ('guid=%s' % m.g('g1-1'), lambda m, y: y == 'g1-1'),
+            result=('name', 'steps', 'path-count')),
       # Many equally short paths: C(r + c, r) from one corner.
       Query(['g0-0'], forward, name('g2-2'), pathlimit='all',
             result=('name', 'path-count', ('path',))),
@@ -755,6 +758,13 @@ def semantics_tests():
       Query(['a', 's', 'h3'], fwd, steps=[('=', 1)], result=('name',)),
       Query(['a', 's', 'h3'], fwd, steps=[('=', 1)], optional=True,
             result=('name',)),
+      # Matches named by guid=: graphd checks those through the
+      # constraint's iterator, not one by one.
+      Query(['a'], fwd, ('guid=%s' % m.g('c'), lambda m, y: y == 'c'),
+            result=('name', 'steps')),
+      Query(['a'], fwd, ('guid=(%s %s)' % (m.g('b'), m.g('d')),
+                         lambda m, y: y in ('b', 'd')),
+            result=('name', 'steps')),
       # Both of s's paths to t, z's first; path is the first of them.
       Query(['s'], fwd, name('t'),
             result=('name', 'path', 'path-count', ('path', 'via'))),
@@ -773,19 +783,10 @@ def main():
   parser.add_argument('--graphd', default=os.path.join(TOP, 'out', 'bin',
                                                        'graphd'))
   ARGS = parser.parse_args()
-  names = []
   for make in [tree_tests, coauthor_tests, grid_tests, semantics_tests]:
     name = make.__name__.replace('_tests', '').replace('_', '-')
     n, checks = make()
-    names.append('path-' + name)
     print('path-%s: %d queries, %d checks against graphd' % (name, n, checks))
-  with open(os.path.join(UNIT, 'pending'), 'w') as f:
-    f.write('# Tests expected to fail until what they test is implemented;\n'
-            '# test/run-tests.sh reports them separately. Remove a test\n'
-            '# from here once it passes.\n\n')
-    f.write('# Path search (doc/path-proposal.md): evaluation.\n')
-    for n in names:
-      f.write(n + '\n')
 
 
 if __name__ == '__main__':

@@ -1,6 +1,4 @@
 /*
-Copyright 2026 Google LLC
-
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -123,6 +121,13 @@ typedef struct graphd_read_path_context {
   /*  Which combination of the step's alternatives is next.
    */
   unsigned long grp_combo;
+
+  /*  If the <-path constraint names its matches (guid=...), the walk
+   *  can stop once it has reached them all: how many it hasn't yet.
+   */
+  pdb_id *grp_targets;
+  size_t grp_targets_n;
+  size_t grp_targets_left;
 
   /*  Nodes first reached in this level.
    */
@@ -518,9 +523,13 @@ static int walk_reach(graphd_read_path_context *grp, pdb_id from,
   if ((err = pdb_id_from_guid(g->g_pdb, &id, guid)) != 0) return err;
 
   if ((pn = run_node(grp->grp_run, id)) == NULL) {
+    size_t i;
+
     pn = cm_hnew(&grp->grp_run->pr_nodes, graphd_path_node, &id, sizeof id);
     if (pn == NULL) return ENOMEM;
     pn->pn_dist = grp->grp_level + 1;
+    for (i = 0; i < grp->grp_targets_n; i++)
+      if (grp->grp_targets[i] == id) grp->grp_targets_left--;
     if ((err = ids_append(cm, &grp->grp_next, &grp->grp_next_n,
                           &grp->grp_next_m, id)) != 0)
       return err;
@@ -705,7 +714,8 @@ static int grp_walk(graphd_stack *stack, graphd_stack_context *sc) {
 
   if (grp->grp_frontier_n == 0 ||
       (con->con_steps.countcon_max_valid &&
-       grp->grp_level >= con->con_steps.countcon_max))
+       grp->grp_level >= con->con_steps.countcon_max) ||
+      (grp->grp_targets_n > 0 && grp->grp_targets_left == 0))
     graphd_stack_resume(stack, sc, grp_match);
   return 0;
 }
@@ -718,6 +728,37 @@ static void match_deliver(void *data, int err, graphd_constraint const *con,
   graphd_read_path_context *grp = data;
   (*grp->grp_callback)(grp->grp_callback_data, err, con, res);
   grp->grp_callback = NULL;
+}
+
+/*  Keep the candidates <con>'s own iterator accepts: graphd moves some
+ *  constraints (guid=, for one) into a constraint's iterator, and
+ *  doesn't check them again.
+ */
+static int keep_accepted(graphd_request *greq, graphd_constraint *con,
+                         pdb_id *ids, size_t *n) {
+  pdb_handle *pdb = graphd_request_graphd(greq)->g_pdb;
+  pdb_iterator *it;
+  pdb_budget budget;
+  size_t i, k;
+  int err;
+
+  if (con->con_it == NULL || *n == 0) return 0;
+  if ((err = pdb_iterator_clone(pdb, con->con_it, &it)) != 0) return err;
+  do {
+    budget = PDB_COST_HIGH;
+    err = pdb_iterator_statistics(pdb, it, &budget);
+  } while (err == PDB_ERR_MORE);
+
+  for (i = k = 0; err == 0 && i < *n; i++) {
+    err = pdb_iterator_check_nonstep(pdb, it, ids[i]);
+    if (err == 0)
+      ids[k++] = ids[i];
+    else if (err == GRAPHD_ERR_NO)
+      err = 0;
+  }
+  pdb_iterator_destroy(pdb, &it);
+  if (err == 0) *n = k;
+  return err;
 }
 
 static int grp_match(graphd_stack *stack, graphd_stack_context *sc) {
@@ -749,6 +790,10 @@ static int grp_match(graphd_stack *stack, graphd_stack_context *sc) {
     if ((err = ids_append(cm, &ids, &n, &m, id)) != 0) goto err;
   }
   qsort(ids, n, sizeof(*ids), id_compare);
+  if ((err = keep_accepted(greq, con, ids, &n)) != 0) {
+    if (ids != NULL) cm_free(cm, ids);
+    goto err;
+  }
 
   if (con->con_path_it != NULL) pdb_iterator_destroy(g->g_pdb, &con->con_path_it);
   err = graphd_iterator_fixed_create_array(g, ids, n, 0, PDB_ITERATOR_HIGH_ANY,
@@ -792,6 +837,7 @@ static void grp_free(graphd_read_path_context *grp) {
   con->con_path_run = grp->grp_saved_run;
 
   run_destroy(greq, grp->grp_run);
+  if (grp->grp_targets != NULL) cm_free(cm, grp->grp_targets);
   if (grp->grp_frontier != NULL) cm_free(cm, grp->grp_frontier);
   if (grp->grp_next != NULL) cm_free(cm, grp->grp_next);
   cm_free(cm, grp);
@@ -825,6 +871,31 @@ static int grp_unsuspend(graphd_stack *stack, graphd_stack_context *sc) {
 static const graphd_stack_type grp_stack_type = {grp_walk, grp_suspend,
                                                  grp_unsuspend};
 
+/*  The nodes a <-path constraint's guid=(...) names, but not the start,
+ *  which never matches.
+ */
+static int find_targets(graphd_read_path_context *grp) {
+  graphd_request *greq = grp->grp_base->grb_greq;
+  graphd_handle *g = graphd_request_graphd(greq);
+  cm_handle *cm = greq->greq_req.req_cm;
+  graphd_guid_constraint const *gc = &grp->grp_con->con_guid;
+  size_t i, m = 0;
+  pdb_id id;
+  int err;
+
+  if (!gc->guidcon_include_valid || gc->guidcon_include.gs_null) return 0;
+  for (i = 0; i < gc->guidcon_include.gs_n; i++) {
+    if (pdb_id_from_guid(g->g_pdb, &id, gc->guidcon_include.gs_guid + i) != 0 ||
+        id == grp->grp_parent_id)
+      continue;
+    if ((err = ids_append(cm, &grp->grp_targets, &grp->grp_targets_n, &m,
+                          id)) != 0)
+      return err;
+  }
+  grp->grp_targets_left = grp->grp_targets_n;
+  return 0;
+}
+
 /**
  * @brief Push a path search: evaluate a <-path constraint for a parent.
  *
@@ -853,7 +924,8 @@ void graphd_read_path_push(graphd_read_base *grb, graphd_constraint *con,
 
   if ((grp->grp_run = run_create(greq, parent_id)) == NULL ||
       (err = ids_append(cm, &grp->grp_frontier, &grp->grp_frontier_n,
-                        &grp->grp_frontier_m, parent_id)) != 0) {
+                        &grp->grp_frontier_m, parent_id)) != 0 ||
+      (err = find_targets(grp)) != 0) {
     grp_free(grp);
     goto err;
   }
