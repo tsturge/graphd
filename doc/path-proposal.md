@@ -304,9 +304,17 @@ since evaluation was implemented.
   them, and their two templates, as trees of their own.
 - **Searching.** When `graphd_read_one()` reaches a `<-path`
   subconstraint, it pushes a path search instead of a read-set. The
-  search walks level by level, evaluating the walking template with its
-  root bound to up to 1,000 frontier nodes at a time (a fixed iterator),
-  and records each new node's distance and predecessors. It then
+  search walks level by level and records each new node's distance and
+  predecessors. If the step is a chain (from the root to `*`, each
+  constraint linked to its one subconstraint, mandatory, with no "or"s),
+  the walk follows it directly: through the linkage indexes, or a
+  primitive's own pointers, checking each primitive against its
+  constraint's intrinsics (which include `live`, versions and `asof`),
+  and remembering what each node part way along the chain reaches. On
+  dblp, the 53,252 people within two co-author steps of one author take
+  0.2 s this way, against 4.6 s through the read machinery. Other steps
+  are walked by evaluating the walking template with its root bound to
+  up to 1,000 frontier nodes at a time (a fixed iterator). It then
   evaluates the `<-path` constraint as an ordinary read-set over the
   nodes reached, with an implicit `sort=(steps guid)`, so its own
   constraints, paging, sort and count work as for any constraint.
@@ -330,7 +338,9 @@ since evaluation was implemented.
    `GRAPHD_PATTERN_PATH_COUNT`) in graphd; the checks above;
    `test/unit/path-parse.sh`. Tests for evaluation (done).
 2. Evaluation, one end (done): see Implementation above; the four
-   evaluation tests pass.
+   evaluation tests pass. Between dblp authors three or four co-author
+   steps apart it takes 13 s to two minutes, mostly reading from disk:
+   from one end, the search reaches most of the graph.
 3. Cost and paging: charge the search to the request's cost allowance;
    cursors that resume a search.
 4. Both ends: reverse a step template, and search from both ends when

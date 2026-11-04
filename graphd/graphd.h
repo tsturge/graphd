@@ -1292,6 +1292,15 @@ struct graphd_constraint {
   graphd_constraint_or **con_path_ors;
   size_t con_path_ors_n;
 
+  /*  If a <-path constraint's walking template is a chain - each
+   *  constraint, from the root to "*", with one subconstraint - the
+   *  chain, which the walk follows directly; con_path_route_n is 0 if
+   *  it isn't, or hasn't been looked at (con_path_route_known).
+   */
+  unsigned int con_path_route_known : 1;
+  graphd_constraint **con_path_route;
+  size_t con_path_route_n;
+
   /* datatype/valuetype values */
   unsigned int con_valuetype : 8;
 
