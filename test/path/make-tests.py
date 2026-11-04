@@ -176,6 +176,11 @@ def only_from(neighbors, ok):
   return lambda m, links, x: neighbors(m, links, x) if ok(m, x) else set()
 
 
+def by_guid(m, n):
+  """Matches named by guid=, which graphd searches for from both ends."""
+  return ('guid=%s' % m.g(n), lambda m, y: y == n)
+
+
 class Query(object):
   """A path query, from each start, by a step.
 
@@ -533,6 +538,16 @@ def tree_tests():
       Query(['n3', 'n30'], down, steps=[('=', 1)], result=('name',)),
       Query(['n3', 'n30'], down, steps=[('=', 1)], optional=True,
             result=('name',)),
+      # The same, named by guid=: searched for from both ends.
+      Query(['n0'], down, by_guid(m, 'n27')),
+      Query(['n27'], up, by_guid(m, 'n0')),
+      Query(['n30'], up, by_guid(m, 'n0'),
+            result=('name', 'steps', 'path-count', ('path', 'via'))),
+      Query(['n30'], down, by_guid(m, 'n0')),
+      Query(['n0'], down, by_guid(m, 'n27'), steps=[('<=', 3)]),
+      Query(['n0'], down, by_guid(m, 'n27'), steps=[('<=', 4)],
+            result=('name', 'steps')),
+      Query(['n0'], down, by_guid(m, 'n0')),
       # A tree has one path to each node.
       Query(['n0'], down, name('n27'),
             result=('name', 'path-count', ('path', 'steps'))),
@@ -580,6 +595,7 @@ def coauthor_tests():
   for a, b in [('a1', 'a2'), ('a3', 'a17'), ('a8', 'a30'), ('a12', 'a33'),
                ('a20', 'a5'), ('a35', 'a39')]:
     qs.append(Query([a], co, name(b)))
+    qs.append(Query([a], co, by_guid(m, b)))
   qs += [
       Query(['a0'], co, name('a11')),
       Query(['a0'], co, name('a36')),
@@ -591,6 +607,16 @@ def coauthor_tests():
             result=('name', 'path', 'via', 'steps')),
       Query(['a4', 'a9', 'a36'], co, name('a21'), optional=True),
       Query(['a4', 'a9', 'a36'], co, name('a21')),
+      # Named by guid=, from both ends: every shortest path, and via.
+      Query(['a0'], co, by_guid(m, farthest[0]),
+            result=('name', 'steps', 'path-count', ('path', 'via'))),
+      Query(['a0'], co, by_guid(m, farthest[-1]), pathlimit=1,
+            result=('name', 'path-count', 'path', ('path',))),
+      Query(['a0'], co, by_guid(m, 'a11'),
+            result=('name', 'path-count', ('path', 'via'))),
+      Query(['a0'], co, by_guid(m, 'a36')),
+      Query(['a4', 'a9', 'a36'], co, by_guid(m, 'a21'), optional=True,
+            result=('name', 'path-count', ('path',))),
       # Several shortest paths.
       Query(['a0'], co, name(farthest[0]),
             result=('name', 'path-count', ('path', 'via'))),
@@ -658,6 +684,17 @@ def grid_tests():
       Query(['g0-0'], both, result='count'),
       Query(['g4-4'], both, steps=[('=', 3)], result='count'),
       Query(['g4-4'], both, pagesize=6, result=('name', 'steps')),
+      # Corner to corner by guid=, from both ends.
+      Query(['g0-0'], forward, by_guid(m, 'g7-7'),
+            result=('steps', 'path-count', 'path')),
+      Query(['g0-0'], forward, by_guid(m, 'g7-7'), pathlimit=3,
+            result=('steps', 'path-count', ('path', 'via'))),
+      Query(['g7-7'], backward, by_guid(m, 'g0-0'), pathlimit=2,
+            result=('path-count', ('path',))),
+      Query(['g0-0'], forward, by_guid(m, 'g2-3'), pathlimit='all',
+            result=('path-count', ('path',))),
+      Query(['g7-7'], forward, by_guid(m, 'g0-0')),
+      Query(['g0-0'], forward, by_guid(m, 'g7-7'), steps=[('<', 14)]),
       # A match named by guid=, among others as near.
       Query(['g0-0'], both, ('guid=%s' % m.g('g1-1'), lambda m, y: y == 'g1-1'),
             result=('name', 'steps', 'path-count')),
@@ -765,6 +802,27 @@ def semantics_tests():
       Query(['a'], fwd, ('guid=(%s %s)' % (m.g('b'), m.g('d')),
                          lambda m, y: y in ('b', 'd')),
             result=('name', 'steps')),
+      # The same questions, named by guid=, from both ends.
+      Query(['a'], fwd, by_guid(m, 'd')),
+      Query(['a'], fwd, by_guid(m, 'a')),
+      Query(['s'], fwd, by_guid(m, 't'),
+            result=('name', 'path', 'path-count', ('path', 'via'))),
+      Query(['o1'], fwd, by_guid(m, 'o2'), result=('name', 'path')),
+      Query(['o1'], open_fwd, by_guid(m, 'o2'), result=('name', 'path')),
+      Query(['o1'], open_fwd, by_guid(m, 'x'), result=('name', 'path')),
+      Query(['x'], open_fwd, by_guid(m, 'o2')),
+      Query(['h1'], fwd, by_guid(m, 'h3'), result=('name', 'path')),
+      Query(['h1'], fwd, by_guid(m, 'h3'), result=('name', 'path'),
+            asof=before),
+      Query(['h1'], fwd, by_guid(m, 'h4'), result=('name', 'path'),
+            asof=moved),
+      Query(['h1'], fwd, by_guid(m, 'h3'), result=('name', 'path'),
+            asof=moved),
+      Query(['a'], fwd, by_guid(m, 'd'), steps=[('>=', 4)]),
+      Query(['a'], fwd, by_guid(m, 'd'), steps=[('=', 3)],
+            result=('name', 'steps')),
+      Query(['a', 's'], fwd, by_guid(m, 't'), optional=True,
+            result=('name', 'path')),
       # Both of s's paths to t, z's first; path is the first of them.
       Query(['s'], fwd, name('t'),
             result=('name', 'path', 'path-count', ('path', 'via'))),

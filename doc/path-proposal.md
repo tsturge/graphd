@@ -1,8 +1,9 @@
 # Path search in graphd: a proposal
 
-Status (branch `path-search`): implemented, searching from one end
-(`graphd/graphd-read-path.c`); searching from both ends, resuming a
-search with a cursor, and MQL are still to come.
+Status (branch `path-search`): implemented, searching from one end or,
+for a single named match and a chain-shaped step, from both
+(`graphd/graphd-read-path.c`); resuming a search with a cursor, and
+MQL, are still to come.
 
 ## Why
 
@@ -206,9 +207,9 @@ paths.
   its own matches, as with any subconstraint; a start with no matches
   drops out unless the `<-path` constraint is `optional`.
 - **Both ends.** When the `<-path` constraint has a single `guid=` and
-  the step can be reversed (by flipping each linkage in the template:
-  graphd can do this mechanically), graphd searches from both ends at
-  once. That changes only the cost, not the answer.
+  the step is a chain (below), graphd searches from both ends at once:
+  a chain is followed backwards by flipping each linkage. That changes
+  only the cost, not the answer.
 - **Limits.** The request's cost allowance (`cost="tu=..."`) bounds the
   search; past it, the read fails with `TOOHARD`, as any other read
   would. `steps<=N` bounds the depth.
@@ -318,6 +319,14 @@ since evaluation was implemented.
   evaluates the `<-path` constraint as an ordinary read-set over the
   nodes reached, with an implicit `sort=(steps guid)`, so its own
   constraints, paging, sort and count work as for any constraint.
+- **Both ends.** With a single `guid=B` and a chain, the search grows
+  whichever side has the smaller frontier, a level at a time, until one
+  side reaches a node the other has. Then it puts together the shortest
+  paths from the start to B: a node within the forward search's radius
+  has the predecessors that search found; one beyond it has those the
+  backward search found one step further back, if they in turn reach
+  the start at the right distance. These replace the forward search's
+  nodes, and the rest is as for one end.
 - **Results.** `path`, `steps`, `path-count` and lists of paths are
   computed from the search's state (`graphd_read_path_value()`); a list
   of paths is turned into a single pattern atom, so the rest of graphd
@@ -343,8 +352,10 @@ since evaluation was implemented.
    from one end, the search reaches most of the graph.
 3. Cost and paging: charge the search to the request's cost allowance;
    cursors that resume a search.
-4. Both ends: reverse a step template, and search from both ends when
-   the match is a single guid.
+4. Both ends (done, for chain-shaped steps): between the same dblp
+   authors, 0.6 s with a cold cache, 0.1-0.2 s warm (Stonebraker to
+   Knuth: 133 s from one end; 158 thousand primitives read instead of
+   74 million).
 5. MQL: expose paths, perhaps as
    `"/type/reflect/path": {"via": P, "to": Q, "target": {...}}`,
    compiled to the template above. A separate design pass.

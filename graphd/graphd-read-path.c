@@ -43,6 +43,14 @@ limitations under the License.
  *      rewritten to return the guids reached at "*" and to page through
  *      everything, with its root bound to the frontier.
  *
+ *      If the step is a chain and the <-path constraint names a single
+ *      match (guid=B), the search goes from both ends: a chain can be
+ *      followed backwards, from "*" to its root.  Each side grows a
+ *      level at a time, the smaller frontier first, until a node one
+ *      side reaches has been reached by the other; then the shortest
+ *      paths from the start to B are put together from both searches
+ *      (two_paths()), and the rest goes on as for one end.
+ *
  *  2.  Match: evaluate the <-path constraint itself as an ordinary
  *      subconstraint, with the nodes reached as its candidates.  Its
  *      own constraints pick the matches; sort, paging and counting work
@@ -149,6 +157,24 @@ typedef struct graphd_read_path_context {
    */
   cm_hashtable grp_memo;
   bool grp_memo_valid;
+
+  /*  Searching from both ends: the search back from the match.  Its
+   *  nodes' pn_dist is their distance to the match, and pn_preds the
+   *  nodes found one step further back from them.
+   */
+  bool grp_two;
+  bool grp_two_back; /* the current level grows the back search */
+  pdb_id grp_two_end;
+  cm_hashtable grp_back;
+  bool grp_back_valid;
+  unsigned long grp_blevel;
+  pdb_id *grp_bfrontier;
+  size_t grp_bfrontier_n;
+  size_t grp_bfrontier_m;
+  size_t grp_bchunk;
+  pdb_id *grp_bnext;
+  size_t grp_bnext_n;
+  size_t grp_bnext_m;
 
   /*  Nodes first reached in this level.
    */
@@ -847,6 +873,393 @@ static int fast_walk(graphd_read_path_context *grp) {
   return err;
 }
 
+/* ---------------------------------------------------------------- */
+/*  Both ends                                                        */
+
+static graphd_path_node *back_node(graphd_read_path_context *grp, pdb_id id) {
+  return cm_haccess(&grp->grp_back, graphd_path_node, &id, sizeof id);
+}
+
+static int back_step(graphd_read_path_context *grp, size_t i, pdb_id id,
+                     pdb_primitive const *pr, pdb_id **ids, size_t *n,
+                     size_t *m);
+
+/*  Follow the chain backwards from <id>, at depth <i>, to the
+ *  constraint above.
+ */
+static int back_prev(graphd_read_path_context *grp, size_t i, pdb_id id,
+                     pdb_primitive const *pr, pdb_id **ids, size_t *n,
+                     size_t *m) {
+  graphd_request *greq = grp->grp_base->grb_greq;
+  pdb_handle *pdb = graphd_request_graphd(greq)->g_pdb;
+  graphd_constraint *cur = grp->grp_con->con_path_route[i];
+  graphd_constraint *prev = grp->grp_con->con_path_route[i - 1];
+  pdb_primitive ppr;
+  pdb_iterator *it;
+  graph_guid guid;
+  pdb_id pid;
+  int err, linkage;
+
+  if (graphd_linkage_is_my(cur->con_linkage)) {
+    /*  This node points to the one above.
+     */
+    linkage = graphd_linkage_my(cur->con_linkage);
+    if (!pdb_primitive_has_linkage(pr, linkage)) return 0;
+    pdb_primitive_linkage_get(pr, linkage, guid);
+    if ((err = pdb_id_from_guid(pdb, &pid, &guid)) != 0)
+      return err == PDB_ERR_NO ? 0 : err;
+    if ((err = pdb_id_read(pdb, pid, &ppr)) != 0) return err;
+    err = graphd_match_intrinsics(greq, prev, &ppr);
+    if (err == 0) err = back_step(grp, i - 1, pid, &ppr, ids, n, m);
+    pdb_primitive_finish(pdb, &ppr);
+    return err == GRAPHD_ERR_NO ? 0 : err;
+  }
+
+  /*  The nodes above point to this one.
+   */
+  linkage = graphd_linkage_i_am(cur->con_linkage);
+  err = pdb_linkage_id_iterator(pdb, linkage, id, PDB_ITERATOR_LOW_ANY,
+                                PDB_ITERATOR_HIGH_ANY, true, false, &it);
+  if (err != 0) return err == PDB_ERR_NO ? 0 : err;
+  while ((err = pdb_iterator_next_nonstep(pdb, it, &pid)) == 0) {
+    if ((err = pdb_id_read(pdb, pid, &ppr)) != 0) break;
+    err = graphd_match_intrinsics(greq, prev, &ppr);
+    if (err == 0) err = back_step(grp, i - 1, pid, &ppr, ids, n, m);
+    pdb_primitive_finish(pdb, &ppr);
+    if (err != 0 && err != GRAPHD_ERR_NO) break;
+  }
+  pdb_iterator_destroy(pdb, &it);
+  return (err == PDB_ERR_NO || err == GRAPHD_ERR_NO) ? 0 : err;
+}
+
+/*  Append to *ids the nodes a step from which reaches <id>, which
+ *  matches the chain's constraint at depth <i>.
+ */
+static int back_step(graphd_read_path_context *grp, size_t i, pdb_id id,
+                     pdb_primitive const *pr, pdb_id **ids, size_t *n,
+                     size_t *m) {
+  cm_handle *cm = grp->grp_base->grb_greq->greq_req.req_cm;
+  pdb_id key[2] = {GRAPHD_PATH_ROUTE_MAX + i, id}, *found = NULL;
+  size_t found_n = 0, found_m = 0, j;
+  path_memo *pm;
+  int err;
+
+  if (i == 0) return ids_append(cm, ids, n, m, id);
+  if (i + 1 == grp->grp_con->con_path_route_n)
+    return back_prev(grp, i, id, pr, ids, n, m);
+
+  if ((pm = cm_haccess(&grp->grp_memo, path_memo, key, sizeof key)) == NULL) {
+    if ((err = back_prev(grp, i, id, pr, &found, &found_n, &found_m)) != 0) {
+      if (found != NULL) cm_free(cm, found);
+      return err;
+    }
+    pm = cm_hnew(&grp->grp_memo, path_memo, key, sizeof key);
+    if (pm == NULL) return ENOMEM;
+    pm->pm_ids = found;
+    pm->pm_n = found_n;
+  }
+  for (j = 0; j < pm->pm_n; j++)
+    if ((err = ids_append(cm, ids, n, m, pm->pm_ids[j])) != 0) return err;
+  return 0;
+}
+
+/*  <u> steps to <v>, which is <grp_blevel> steps from the match.
+ */
+static int back_reach(graphd_read_path_context *grp, pdb_id v, pdb_id u) {
+  cm_handle *cm = grp->grp_base->grb_greq->greq_req.req_cm;
+  graphd_path_node *pu, *pv;
+  int err;
+
+  if ((pu = back_node(grp, u)) == NULL) {
+    pu = cm_hnew(&grp->grp_back, graphd_path_node, &u, sizeof u);
+    if (pu == NULL) return ENOMEM;
+    pu->pn_dist = grp->grp_blevel + 1;
+    if ((err = ids_append(cm, &grp->grp_bnext, &grp->grp_bnext_n,
+                          &grp->grp_bnext_m, u)) != 0)
+      return err;
+  } else if (pu->pn_dist != grp->grp_blevel + 1)
+    return 0;
+
+  pv = back_node(grp, v);
+  if (pv->pn_preds_n > 0 && pv->pn_preds[pv->pn_preds_n - 1] == u) return 0;
+  return ids_append(cm, &pv->pn_preds, &pv->pn_preds_n, &pv->pn_preds_m, u);
+}
+
+/*  Step back from up to GRAPHD_PATH_FAST_BATCH nodes of the back
+ *  frontier.
+ */
+static int back_walk(graphd_read_path_context *grp) {
+  graphd_request *greq = grp->grp_base->grb_greq;
+  pdb_handle *pdb = graphd_request_graphd(greq)->g_pdb;
+  cm_handle *cm = greq->greq_req.req_cm;
+  size_t k = grp->grp_con->con_path_route_n - 1;
+  pdb_id *ids = NULL, v;
+  size_t n, m = 0, end, j;
+  pdb_primitive pr;
+  int err = 0;
+
+  end = grp->grp_bchunk + GRAPHD_PATH_FAST_BATCH;
+  if (end > grp->grp_bfrontier_n) end = grp->grp_bfrontier_n;
+  for (; err == 0 && grp->grp_bchunk < end; grp->grp_bchunk++) {
+    v = grp->grp_bfrontier[grp->grp_bchunk];
+    if ((err = pdb_id_read(pdb, v, &pr)) != 0) break;
+    n = 0;
+    err = back_step(grp, k, v, &pr, &ids, &n, &m);
+    pdb_primitive_finish(pdb, &pr);
+    for (j = 0; err == 0 && j < n; j++) err = back_reach(grp, v, ids[j]);
+  }
+  if (ids != NULL) cm_free(cm, ids);
+  return err;
+}
+
+static int pred_compare_dist(void const *a, void const *b) {
+  graphd_path_node const *const *x = a, *const *y = b;
+  return (*x)->pn_dist < (*y)->pn_dist ? -1 : (*x)->pn_dist > (*y)->pn_dist;
+}
+
+/*  The searches from both ends have met, <dist> apart: put together the
+ *  shortest paths from the start to the match, and make them the run's
+ *  nodes, as if one search had found them.
+ *
+ *  A node <p> steps along a shortest path is in the search from the
+ *  start if p is within its radius; its predecessors are as that search
+ *  found them.  Otherwise it is in the search from the match, at
+ *  distance <dist> - p, and its predecessors are the nodes that search
+ *  found one step further back from it -- provided that they are, in
+ *  turn, <p> - 1 steps from the start.
+ */
+static int two_paths(graphd_read_path_context *grp, unsigned long dist) {
+  graphd_request *greq = grp->grp_base->grb_greq;
+  cm_handle *cm = greq->greq_req.req_cm;
+  graphd_path_run *run = grp->grp_run;
+  cm_hashtable nodes;
+  graphd_path_node *pn, *fn, *bn, *un, **order = NULL;
+  pdb_id *queue = NULL, v, u, start = run->pr_start;
+  size_t queue_n = 0, queue_m = 0, qi, i, j, k, order_n = 0;
+  int err;
+
+  if (cm_hashinit(cm, &nodes, sizeof(graphd_path_node), 10) != 0)
+    return ENOMEM;
+
+  /*  From the match back towards the start.
+   */
+  pn = cm_hnew(&nodes, graphd_path_node, &grp->grp_two_end, sizeof(pdb_id));
+  if (pn == NULL) return ENOMEM;
+  pn->pn_dist = dist;
+  if ((err = ids_append(cm, &queue, &queue_n, &queue_m, grp->grp_two_end)))
+    return err;
+
+  for (qi = 0; qi < queue_n; qi++) {
+    v = queue[qi];
+    pn = cm_haccess(&nodes, graphd_path_node, &v, sizeof v);
+    if (pn->pn_dist == 0) continue;
+
+    fn = run_node(run, v);
+    bn = back_node(grp, v);
+    if (fn != NULL && fn->pn_dist == pn->pn_dist) {
+      for (j = 0; j < fn->pn_preds_n; j++)
+        if ((err = ids_append(cm, &pn->pn_preds, &pn->pn_preds_n,
+                              &pn->pn_preds_m, fn->pn_preds[j])) != 0)
+          return err;
+    } else if (pn->pn_dist > grp->grp_level && bn != NULL &&
+               bn->pn_dist == dist - pn->pn_dist) {
+      for (j = 0; j < bn->pn_preds_n; j++) {
+        un = back_node(grp, bn->pn_preds[j]);
+        if (un != NULL && un->pn_dist == bn->pn_dist + 1 &&
+            (err = ids_append(cm, &pn->pn_preds, &pn->pn_preds_n,
+                              &pn->pn_preds_m, bn->pn_preds[j])) != 0)
+          return err;
+      }
+    }
+    for (j = 0; j < pn->pn_preds_n; j++) {
+      u = pn->pn_preds[j];
+      if (cm_haccess(&nodes, graphd_path_node, &u, sizeof u) != NULL) continue;
+      /*  (cm_hnew may move nothing: values stay where they are.) */
+      un = cm_hnew(&nodes, graphd_path_node, &u, sizeof u);
+      if (un == NULL) return ENOMEM;
+      un->pn_dist = pn->pn_dist - 1;
+      if ((err = ids_append(cm, &queue, &queue_n, &queue_m, u)) != 0)
+        return err;
+    }
+  }
+  cm_free(cm, queue);
+
+  /*  Keep the nodes that reach the start, nearest first: a node is on a
+   *  path if one of its predecessors is.  (pn_count marks them.)
+   */
+  order = cm_malloc(cm, (cm_hashnelems(&nodes) + 1) * sizeof(*order));
+  if (order == NULL) return ENOMEM;
+  pn = NULL;
+  while ((pn = cm_hnext(&nodes, graphd_path_node, pn)) != NULL)
+    order[order_n++] = pn;
+  qsort(order, order_n, sizeof(*order), pred_compare_dist);
+  for (i = 0; i < order_n; i++) {
+    pn = order[i];
+    if (pn->pn_dist == 0) {
+      pn->pn_count = (*(pdb_id const *)cm_hashmem(&nodes, pn) == start);
+      continue;
+    }
+    for (j = k = 0; j < pn->pn_preds_n; j++) {
+      un = cm_haccess(&nodes, graphd_path_node, pn->pn_preds + j,
+                      sizeof(pdb_id));
+      if (un != NULL && un->pn_count) pn->pn_preds[k++] = pn->pn_preds[j];
+    }
+    pn->pn_preds_n = k;
+    qsort(pn->pn_preds, k, sizeof(*pn->pn_preds), id_compare);
+    for (j = k = 0; j < pn->pn_preds_n; j++)
+      if (k == 0 || pn->pn_preds[j] != pn->pn_preds[k - 1])
+        pn->pn_preds[k++] = pn->pn_preds[j];
+    pn->pn_preds_n = k;
+    pn->pn_count = (k > 0);
+  }
+  for (i = 0; i < order_n; i++) {
+    pn = order[i];
+    if (!pn->pn_count) {
+      if (pn->pn_preds != NULL) cm_free(cm, pn->pn_preds);
+      cm_hashdelete(&nodes, pn);
+    } else
+      pn->pn_count = (pn->pn_dist == 0);
+  }
+  cm_free(cm, order);
+
+  /*  The start, even if no path survived; and the new nodes in place of
+   *  the search's.
+   */
+  if (cm_haccess(&nodes, graphd_path_node, &start, sizeof start) == NULL) {
+    pn = cm_hnew(&nodes, graphd_path_node, &start, sizeof start);
+    if (pn == NULL) return ENOMEM;
+    pn->pn_count = 1;
+  }
+  pn = NULL;
+  while ((pn = cm_hnext(&run->pr_nodes, graphd_path_node, pn)) != NULL)
+    if (pn->pn_preds != NULL) cm_free(cm, pn->pn_preds);
+  cm_hashfinish(&run->pr_nodes);
+  run->pr_nodes = nodes;
+  return 0;
+}
+
+/*  A level of the search from the start is done.
+ */
+static void fwd_level_done(graphd_read_path_context *grp) {
+  pdb_id *swap;
+  size_t n;
+
+  walk_sort_preds(grp);
+  qsort(grp->grp_next, grp->grp_next_n, sizeof(*grp->grp_next), id_compare);
+  swap = grp->grp_frontier;
+  grp->grp_frontier = grp->grp_next;
+  grp->grp_frontier_n = grp->grp_next_n;
+  n = grp->grp_frontier_m;
+  grp->grp_frontier_m = grp->grp_next_m;
+  grp->grp_next = swap;
+  grp->grp_next_n = 0;
+  grp->grp_next_m = n;
+  grp->grp_chunk = 0;
+  grp->grp_level++;
+}
+
+static void back_level_done(graphd_read_path_context *grp) {
+  pdb_id *swap;
+  size_t n;
+
+  qsort(grp->grp_bnext, grp->grp_bnext_n, sizeof(*grp->grp_bnext),
+        id_compare);
+  swap = grp->grp_bfrontier;
+  grp->grp_bfrontier = grp->grp_bnext;
+  grp->grp_bfrontier_n = grp->grp_bnext_n;
+  n = grp->grp_bfrontier_m;
+  grp->grp_bfrontier_m = grp->grp_bnext_m;
+  grp->grp_bnext = swap;
+  grp->grp_bnext_n = 0;
+  grp->grp_bnext_m = n;
+  grp->grp_bchunk = 0;
+  grp->grp_blevel++;
+}
+
+static int two_start(graphd_read_path_context *grp) {
+  cm_handle *cm = grp->grp_base->grb_greq->greq_req.req_cm;
+  graphd_path_node *pn;
+  int err;
+
+  grp->grp_two = true;
+  grp->grp_two_end = grp->grp_targets[0];
+  if (cm_hashinit(cm, &grp->grp_back, sizeof(graphd_path_node), 10) != 0)
+    return ENOMEM;
+  grp->grp_back_valid = true;
+  pn = cm_hnew(&grp->grp_back, graphd_path_node, &grp->grp_two_end,
+               sizeof(pdb_id));
+  if (pn == NULL) return ENOMEM;
+  if ((err = ids_append(cm, &grp->grp_bfrontier, &grp->grp_bfrontier_n,
+                        &grp->grp_bfrontier_m, grp->grp_two_end)) != 0)
+    return err;
+  if (!grp->grp_memo_valid) {
+    if (cm_hashinit(cm, &grp->grp_memo, sizeof(path_memo), 10) != 0)
+      return ENOMEM;
+    grp->grp_memo_valid = true;
+  }
+  return 0;
+}
+
+/*  Search from both ends, a batch at a time.
+ */
+static int two_walk(graphd_stack *stack, graphd_stack_context *sc) {
+  graphd_read_path_context *grp = (void *)sc;
+  graphd_constraint *con = grp->grp_con;
+  graphd_path_node *pn;
+  unsigned long dist = ULONG_MAX;
+  size_t i;
+  int err;
+
+  if (grp->grp_err != 0) {
+    graphd_stack_resume(stack, sc, grp_match);
+    return 0;
+  }
+
+  if (!grp->grp_two_back) {
+    if (grp->grp_chunk < grp->grp_frontier_n) {
+      if ((err = fast_walk(grp)) != 0) grp->grp_err = err;
+      return 0;
+    }
+    fwd_level_done(grp);
+    for (i = 0; i < grp->grp_frontier_n; i++)
+      if ((pn = back_node(grp, grp->grp_frontier[i])) != NULL &&
+          grp->grp_level + pn->pn_dist < dist)
+        dist = grp->grp_level + pn->pn_dist;
+  } else {
+    if (grp->grp_bchunk < grp->grp_bfrontier_n) {
+      if ((err = back_walk(grp)) != 0) grp->grp_err = err;
+      return 0;
+    }
+    back_level_done(grp);
+    for (i = 0; i < grp->grp_bfrontier_n; i++)
+      if ((pn = run_node(grp->grp_run, grp->grp_bfrontier[i])) != NULL &&
+          pn->pn_dist + grp->grp_blevel < dist)
+        dist = pn->pn_dist + grp->grp_blevel;
+  }
+
+  if (dist != ULONG_MAX) {
+    /*  The searches have met.
+     */
+    if ((err = two_paths(grp, dist)) != 0) grp->grp_err = err;
+    graphd_stack_resume(stack, sc, grp_match);
+    return 0;
+  }
+  if (grp->grp_frontier_n == 0 || grp->grp_bfrontier_n == 0 ||
+      (con->con_steps.countcon_max_valid &&
+       grp->grp_level + grp->grp_blevel >= con->con_steps.countcon_max)) {
+    /*  No path (within bounds): nothing the start reaches matches.
+     */
+    if ((err = two_paths(grp, 0)) != 0) grp->grp_err = err;
+    graphd_stack_resume(stack, sc, grp_match);
+    return 0;
+  }
+
+  /*  Grow the smaller side.
+   */
+  grp->grp_two_back = grp->grp_bfrontier_n < grp->grp_frontier_n;
+  return 0;
+}
+
 static void memo_finish(graphd_read_path_context *grp) {
   cm_handle *cm = grp->grp_base->grb_greq->greq_req.req_cm;
   path_memo *pm = NULL;
@@ -863,7 +1276,6 @@ static int grp_walk(graphd_stack *stack, graphd_stack_context *sc) {
   graphd_request *greq = grp->grp_base->grb_greq;
   graphd_constraint *con = grp->grp_con;
   graphd_constraint *walk = con->con_step_walk;
-  pdb_id *swap;
   size_t n;
   int err;
 
@@ -874,6 +1286,17 @@ static int grp_walk(graphd_stack *stack, graphd_stack_context *sc) {
 
   if (!con->con_path_route_known && (err = route_find(greq, con)) != 0) {
     grp->grp_err = err;
+    return 0;
+  }
+
+  /*  A chain, and a single match: search from both ends.
+   */
+  if (con->con_path_route_n > 0 && grp->grp_targets_n == 1 && !grp->grp_two) {
+    if ((err = two_start(grp)) != 0) {
+      grp->grp_err = err;
+      return 0;
+    }
+    graphd_stack_resume(stack, sc, two_walk);
     return 0;
   }
 
@@ -918,18 +1341,7 @@ static int grp_walk(graphd_stack *stack, graphd_stack_context *sc) {
   /*  The level is done: the nodes it reached are the next frontier.
    */
 level_done:
-  walk_sort_preds(grp);
-  qsort(grp->grp_next, grp->grp_next_n, sizeof(*grp->grp_next), id_compare);
-  swap = grp->grp_frontier;
-  grp->grp_frontier = grp->grp_next;
-  grp->grp_frontier_n = grp->grp_next_n;
-  n = grp->grp_frontier_m;
-  grp->grp_frontier_m = grp->grp_next_m;
-  grp->grp_next = swap;
-  grp->grp_next_n = 0;
-  grp->grp_next_m = n;
-  grp->grp_chunk = 0;
-  grp->grp_level++;
+  fwd_level_done(grp);
 
   if (grp->grp_frontier_n == 0 ||
       (con->con_steps.countcon_max_valid &&
@@ -1057,6 +1469,14 @@ static void grp_free(graphd_read_path_context *grp) {
 
   run_destroy(greq, grp->grp_run);
   memo_finish(grp);
+  if (grp->grp_back_valid) {
+    graphd_path_node *pn = NULL;
+    while ((pn = cm_hnext(&grp->grp_back, graphd_path_node, pn)) != NULL)
+      if (pn->pn_preds != NULL) cm_free(cm, pn->pn_preds);
+    cm_hashfinish(&grp->grp_back);
+  }
+  if (grp->grp_bfrontier != NULL) cm_free(cm, grp->grp_bfrontier);
+  if (grp->grp_bnext != NULL) cm_free(cm, grp->grp_bnext);
   if (grp->grp_targets != NULL) cm_free(cm, grp->grp_targets);
   if (grp->grp_frontier != NULL) cm_free(cm, grp->grp_frontier);
   if (grp->grp_next != NULL) cm_free(cm, grp->grp_next);
