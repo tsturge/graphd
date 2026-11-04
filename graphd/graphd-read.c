@@ -483,6 +483,154 @@ static int graphd_read_compile_asof(graphd_request* greq) {
   return 0;
 }
 
+/*  A constraint's subconstraint list, as it was before its <-path
+ *  constraints were taken out.
+ */
+typedef struct path_detached {
+  graphd_constraint* pd_con;
+  graphd_constraint* pd_head;
+  graphd_constraint** pd_tail;
+  size_t pd_subcon_n;
+  graphd_constraint** pd_subs;  /* all subconstraints, in order */
+  size_t pd_subs_n;
+} path_detached;
+
+static int graphd_read_compile_tree(graphd_request* greq,
+                                    graphd_constraint* con);
+
+/*  Take the <-path constraints out of the subconstraint lists of the
+ *  tree below <con>, saving the lists in *pd (*pd_n of them).
+ */
+static int paths_detach(graphd_request* greq, graphd_constraint* con,
+                        path_detached** pd, size_t* pd_n, size_t* pd_m) {
+  cm_handle* cm = greq->greq_req.req_cm;
+  graphd_constraint *sub, **tail;
+  path_detached* d;
+  size_t n = 0, i;
+  int err;
+
+  for (sub = con->con_head; sub != NULL; sub = sub->con_next) {
+    n++;
+    if (!sub->con_path &&
+        (err = paths_detach(greq, sub, pd, pd_n, pd_m)) != 0)
+      return err;
+  }
+  for (sub = con->con_head; sub != NULL; sub = sub->con_next)
+    if (sub->con_path) break;
+  if (sub == NULL) return 0;
+
+  if (*pd_n >= *pd_m) {
+    size_t m = *pd_m ? 2 * *pd_m : 4;
+    path_detached* p = cm_realloc(cm, *pd, m * sizeof(**pd));
+    if (p == NULL) return ENOMEM;
+    *pd = p;
+    *pd_m = m;
+  }
+  d = *pd + (*pd_n)++;
+  d->pd_con = con;
+  d->pd_head = con->con_head;
+  d->pd_tail = con->con_tail;
+  d->pd_subcon_n = con->con_subcon_n;
+  d->pd_subs_n = n;
+  if ((d->pd_subs = cm_malloc(cm, n * sizeof(*d->pd_subs))) == NULL)
+    return ENOMEM;
+  for (sub = con->con_head, i = 0; sub != NULL; sub = sub->con_next)
+    d->pd_subs[i++] = sub;
+
+  con->con_head = NULL;
+  tail = &con->con_head;
+  con->con_subcon_n = 0;
+  for (i = 0; i < n; i++)
+    if (!d->pd_subs[i]->con_path) {
+      *tail = d->pd_subs[i];
+      tail = &d->pd_subs[i]->con_next;
+      con->con_subcon_n++;
+    }
+  *tail = NULL;
+  con->con_tail = tail;
+  return 0;
+}
+
+/*  Put the subconstraint lists back as they were.
+ */
+static void paths_attach(path_detached* pd, size_t pd_n) {
+  path_detached* d;
+  size_t i;
+
+  for (d = pd + pd_n; d-- > pd;) {
+    for (i = 0; i + 1 < d->pd_subs_n; i++)
+      d->pd_subs[i]->con_next = d->pd_subs[i + 1];
+    d->pd_subs[d->pd_subs_n - 1]->con_next = NULL;
+    d->pd_con->con_head = d->pd_head;
+    d->pd_con->con_tail = d->pd_tail;
+    d->pd_con->con_subcon_n = d->pd_subcon_n;
+  }
+}
+
+/*  Compile <con> as the root of a tree: as itself, a <-path constraint,
+ *  or a step template.
+ */
+static int compile_root(graphd_request* greq, graphd_constraint* con) {
+  graphd_constraint* parent = con->con_parent;
+  int err;
+
+  graphd_constraint_set_parent(con, NULL);
+  err = graphd_read_compile_tree(greq, con);
+  graphd_constraint_set_parent(con, parent);
+  return err;
+}
+
+/*  Compile a constraint tree for reading: convert timestamps,
+ *  datelines, types and guids, and annotate it with iterators.
+ *
+ *  <-path constraints aren't linked to their parents: they and their
+ *  step templates are compiled as trees of their own.
+ */
+static int graphd_read_compile_tree(graphd_request* greq,
+                                    graphd_constraint* con) {
+  cm_handle* cm = greq->greq_req.req_cm;
+  path_detached* pd = NULL;
+  size_t pd_n = 0, pd_m = 0, i, j;
+  graphd_constraint* sub;
+  int err;
+
+  if ((err = paths_detach(greq, con, &pd, &pd_n, &pd_m)) != 0) goto done;
+
+  if ((err = graphd_read_compile_timestamps(greq, con)) != 0 ||
+      (err = graphd_read_compile_datelines(greq, con)) != 0 ||
+      (err = graphd_read_convert_types(greq, con)) != 0)
+    goto done;
+
+  if ((err = graphd_guid_constraint_convert(greq, con, true /* read */)) !=
+      0) {
+    cl_log_errno(graphd_request_cl(greq), CL_LEVEL_FAIL,
+                 "graphd_guid_constraint_convert", err, "unexpected");
+    goto done;
+  }
+  if ((err = graphd_islink_examine_constraint(greq, con)) != 0) {
+    cl_log_errno(graphd_request_cl(greq), CL_LEVEL_FAIL,
+                 "graphd_islink_examine_constraint", err, "unexpected");
+    goto done;
+  }
+  if ((err = graphd_constraint_iterator(greq, con)) != 0) goto done;
+
+  for (i = 0; i < pd_n; i++)
+    for (j = 0; j < pd[i].pd_subs_n; j++) {
+      sub = pd[i].pd_subs[j];
+      if (!sub->con_path) continue;
+      if ((err = compile_root(greq, sub)) != 0 ||
+          (err = compile_root(greq, sub->con_step)) != 0 ||
+          (err = compile_root(greq, sub->con_step_walk)) != 0)
+        goto done;
+    }
+
+done:
+  paths_attach(pd, pd_n);
+  for (i = 0; i < pd_n; i++) cm_free(cm, pd[i].pd_subs);
+  if (pd != NULL) cm_free(cm, pd);
+  return err;
+}
+
 /*  Receive a result from a previously pushed tree.
  */
 static void graphd_read_push_callback(void* data, int err,
@@ -520,32 +668,12 @@ void graphd_read_push(graphd_request* greq, graphd_constraint* con,
   if (err != 0) goto err;
 
   /*  Convert string types to GUIDs, datelines,
-   *  and generations to their current instances.
+   *  and generations to their current instances,
+   *  and annotate the constraint subtree with iterators.
    */
-  if ((err = graphd_read_compile_timestamps(greq, con)) != 0 ||
-      (err = graphd_read_compile_asof(greq)) != 0 ||
-      (err = graphd_read_compile_datelines(greq, con)) != 0 ||
-      (err = graphd_read_convert_types(greq, con)) != 0)
+  if ((err = graphd_read_compile_asof(greq)) != 0 ||
+      (err = graphd_read_compile_tree(greq, con)) != 0)
     goto err;
-
-  err = graphd_guid_constraint_convert(greq, con, true /* read */);
-  if (err != 0) {
-    cl_log_errno(cl, CL_LEVEL_FAIL, "graphd_guid_constraint_convert", err,
-                 "unexpected");
-    goto err;
-  }
-
-  err = graphd_islink_examine_constraint(greq, con);
-  if (err != 0) {
-    cl_log_errno(cl, CL_LEVEL_FAIL, "graphd_islink_examine_constraint", err,
-                 "unexpected");
-    goto err;
-  }
-
-  /*  Annotate the constraint subtree with iterators.
-   */
-  err = graphd_constraint_iterator(greq, con);
-  if (err != 0) goto err;
 
   PDB_IS_ITERATOR(cl, con->con_it);
 

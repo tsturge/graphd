@@ -2,8 +2,3 @@
 # test/run-tests.sh reports them separately. Remove a test
 # from here once it passes.
 
-# Path search (doc/path-proposal.md): evaluation.
-path-tree
-path-coauthor
-path-grid
-path-semantics

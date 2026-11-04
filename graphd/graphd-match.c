@@ -542,6 +542,23 @@ int graphd_match(graphd_request* greq, graphd_constraint* con,
   cl_handle* cl = graphd_request_cl(greq);
   int err = 0;
 
+  /*  A path step's alternative, switched off while the others are
+   *  explored.
+   */
+  if (con->con_path_off) goto no;
+
+  /*  In a step template evaluated for one step, "*" is that step's end.
+   */
+  if (con->con_step_bound_valid) {
+    graph_guid guid;
+    pdb_id id;
+
+    pdb_primitive_guid_get(pr, guid);
+    err = pdb_id_from_guid(graphd_request_graphd(greq)->g_pdb, &id, &guid);
+    if (err != 0) return err;
+    if (id != con->con_step_bound) goto no;
+  }
+
   if ((err = graphd_match_intrinsics(greq, con, pr)) != 0) {
     if (err != GRAPHD_ERR_NO) return err;
     goto no;

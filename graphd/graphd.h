@@ -92,6 +92,7 @@ typedef struct graphd_property graphd_property;
 typedef struct graphd_value graphd_value;
 typedef struct graphd_and_slow_check_state graphd_and_slow_check_state;
 typedef struct graphd_constraint graphd_constraint;
+typedef struct graphd_path_run graphd_path_run;
 typedef struct graphd_value_range graphd_value_range;
 typedef struct graphd_constraint_clause graphd_constraint_clause;
 typedef struct graphd_constraint_or graphd_constraint_or;
@@ -684,7 +685,11 @@ typedef enum graphd_pattern_type {
   GRAPHD_PATTERN_VIA = 32,
 
   /** @brief The number of shortest paths to a path search's match. */
-  GRAPHD_PATTERN_PATH_COUNT = 33
+  GRAPHD_PATTERN_PATH_COUNT = 33,
+
+  /** @brief A list of paths, a third level of result list in a
+   *  <-path constraint's result; its elements are the pattern's list. */
+  GRAPHD_PATTERN_PATH_LIST = 34
 
 } graphd_pattern_type;
 
@@ -1257,12 +1262,35 @@ struct graphd_constraint {
    */
   graphd_constraint *con_step_walk;
 
-  /*  How many of each match's shortest paths to return, each as a
-   *  result of its own ("pathlimit"); ULLONG_MAX for all of them.
-   *  Without pathlimit, one.
+  /*  How many of each match's shortest paths to put in a list of paths
+   *  ("pathlimit"); ULLONG_MAX for all of them.
    */
   unsigned int con_pathlimit_valid : 1;
   unsigned long long con_pathlimit;
+
+  /*  Evaluating paths (graphd-read-path.c).  con_path_list is the
+   *  list of paths in the result, if any; con_path_via is set if a
+   *  result asks for via.  While a <-path constraint is evaluated for a
+   *  parent, con_path_run is the search's state and con_path_it its
+   *  candidates.  In a step template, a bound "*" matches only
+   *  con_step_bound.  Results from constraints with con_no_defer are
+   *  never deferred.
+   */
+  graphd_pattern *con_path_list;
+  unsigned int con_path_via : 1;
+  struct graphd_path_run *con_path_run;
+  pdb_iterator *con_path_it;
+  unsigned int con_step_bound_valid : 1;
+  pdb_id con_step_bound;
+  unsigned int con_no_defer : 1;
+
+  /*  An "or" alternative switched off: walking a step explores each of
+   *  its alternatives in turn.  con_path_ors are the "or"s of a
+   *  <-path constraint's walking template.
+   */
+  unsigned int con_path_off : 1;
+  graphd_constraint_or **con_path_ors;
+  size_t con_path_ors_n;
 
   /* datatype/valuetype values */
   unsigned int con_valuetype : 8;
@@ -4246,6 +4274,20 @@ void graphd_runtime_endtoend_initialize(graphd_request *greq);
 
 void graphd_semantic_constraint_complete(graphd_request *_greq,
                                          graphd_constraint *_con);
+
+void graphd_semantic_constraint_complete_template(graphd_request *_greq,
+                                                  graphd_constraint *_con);
+
+void graphd_constraint_set_parent(graphd_constraint *_con,
+                                  graphd_constraint *_parent);
+
+/* graphd-read-path.c */
+
+int graphd_read_path_semantic(graphd_request *_greq, graphd_constraint *_con);
+int graphd_read_path_value(graphd_request *_greq,
+                           graphd_constraint const *_con,
+                           graphd_pattern const *_pat,
+                           pdb_primitive const *_pr, graphd_value *_val);
 
 void graphd_semantic_constraint_complete_parse(graphd_request *_req,
                                                graphd_constraint *_con);

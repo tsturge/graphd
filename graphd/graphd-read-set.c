@@ -1418,7 +1418,7 @@ static int grsc_are_we_done(graphd_stack *const stack,
    */
   if (grsc->grsc_verify &&
       grsc_absolute_count(grsc) >= con->con_count.countcon_min &&
-      !con->con_count.countcon_max_valid) {
+      !con->con_count.countcon_max_valid && !con->con_no_defer) {
     graphd_value *res = NULL;
 
     /*  Defer results.  We've run long enough to know that
@@ -2472,6 +2472,12 @@ void graphd_read_set_push(graphd_read_base *grb, graphd_constraint *con,
    */
   if (con->con_parent == NULL) {
     err = pdb_iterator_clone(g->g_pdb, con->con_it, &grsc->grsc_it);
+  } else if (con->con_path) {
+    /*  The nodes a path search reached (graphd-read-path.c).
+     */
+    err = pdb_iterator_clone(g->g_pdb, con->con_path_it, &grsc->grsc_it);
+    pdb_primitive_guid_get(parent_pr, grsc->grsc_parent_guid);
+    grsc->grsc_parent_id = parent_id;
   } else {
     cl_assert(cl, parent_id != PDB_ID_NONE);
     cl_assert(cl, parent_pr != NULL);

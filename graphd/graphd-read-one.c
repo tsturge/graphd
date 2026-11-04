@@ -882,6 +882,18 @@ static int groc_stack_run(graphd_stack *stack,
 
   cl_enter(cl, CL_LEVEL_VERBOSE, "enter");
 
+  /*  A <-path constraint's match: compute the via of its paths'
+   *  steps before delivering.
+   */
+  if (groc->groc_err == 0 && groc->groc_sub == NULL && groc->groc_con->con_path &&
+      groc->groc_con->con_path_via && !groc->groc_via_done) {
+    groc->groc_via_done = true;
+    graphd_read_path_via_push(groc->groc_base, groc->groc_con,
+                              groc->groc_pc.pc_id, &groc->groc_err);
+    cl_leave(cl, CL_LEVEL_VERBOSE, "(via)");
+    return 0;
+  }
+
   /*  There was an error, or we ran out of subconstraints?
    */
   if (groc->groc_err != 0 || groc->groc_sub == NULL) {
@@ -894,9 +906,19 @@ static int groc_stack_run(graphd_stack *stack,
   /*  Generate the results for the subconstraint, given
    *  our constraint.
    */
-  graphd_read_set_push(groc->groc_base, groc->groc_sub, groc->groc_pc.pc_id,
-                       groc->groc_pc.pc_pr_valid ? &groc->groc_pc.pc_pr : NULL,
-                       groc_set_deliver, groc);
+  if (groc->groc_sub->con_path) {
+    /*  A subconstraint linked by a path: search.
+     */
+    if (!groc->groc_pc.pc_pr_valid && (groc->groc_err = groc_cache_pr(groc))) {
+      cl_leave(cl, CL_LEVEL_VERBOSE, "(error)");
+      return 0;
+    }
+    graphd_read_path_push(groc->groc_base, groc->groc_sub, groc->groc_pc.pc_id,
+                          &groc->groc_pc.pc_pr, groc_set_deliver, groc);
+  } else
+    graphd_read_set_push(groc->groc_base, groc->groc_sub, groc->groc_pc.pc_id,
+                         groc->groc_pc.pc_pr_valid ? &groc->groc_pc.pc_pr : NULL,
+                         groc_set_deliver, groc);
 
   cl_leave(cl, CL_LEVEL_VERBOSE, "(pushed)");
   return 0;
@@ -1048,7 +1070,8 @@ void graphd_read_one_push(graphd_read_base *grb, graphd_read_set_context *grsc,
    *  This may (a) fail (b) return deferred evaluation frames.
    */
   groc->groc_sub = NULL;
-  if (groc_next_subconstraint(groc)) {
+  if (groc_next_subconstraint(groc) ||
+      (con->con_path && con->con_path_via)) {
     graphd_stack_push(&greq->greq_stack, (graphd_stack_context *)groc,
                       &groc_resource_type, &groc_stack_type);
   } else {

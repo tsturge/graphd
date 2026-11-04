@@ -179,6 +179,11 @@ typedef struct graphd_read_one_context {
    */
   int groc_err;
 
+  /*  For a <-path constraint's match: set once the via of its
+   *  paths' steps has been computed.
+   */
+  unsigned int groc_via_done : 1;
+
 } graphd_read_one_context;
 
 typedef void graphd_read_set_callback(void *data, int err,
@@ -387,6 +392,15 @@ void graphd_read_set_push(graphd_read_base *_grb, graphd_constraint *_con,
                           pdb_id _parent_id, pdb_primitive const *_parent_pr,
                           graphd_read_set_callback *_callback,
                           void *_callback_data);
+
+/* graphd-read-path.c */
+
+void graphd_read_path_push(graphd_read_base *_grb, graphd_constraint *_con,
+                           pdb_id _parent_id, pdb_primitive const *_parent_pr,
+                           graphd_read_set_callback *_callback,
+                           void *_callback_data);
+void graphd_read_path_via_push(graphd_read_base *_grb, graphd_constraint *_con,
+                               pdb_id _id, int *_err_out);
 
 void graphd_read_set_resume(graphd_read_set_context *grsc,
                             graphd_read_set_callback *callback,

@@ -157,6 +157,34 @@ bool graphd_constraint_dateline_too_young(graphd_handle* g,
          id >= ull;
 }
 
+/*  Change <con>'s parent.  The branches of its "or"s share its parent,
+ *  and change with it.
+ */
+static void set_branch_parents(graphd_constraint* con,
+                               graphd_constraint* old_parent,
+                               graphd_constraint* parent) {
+  graphd_constraint_or* cor;
+
+  for (cor = con->con_or_head; cor != NULL; cor = cor->or_next) {
+    if (cor->or_head.con_parent == old_parent) {
+      cor->or_head.con_parent = parent;
+      set_branch_parents(&cor->or_head, old_parent, parent);
+    }
+    if (cor->or_tail != NULL && cor->or_tail->con_parent == old_parent) {
+      cor->or_tail->con_parent = parent;
+      set_branch_parents(cor->or_tail, old_parent, parent);
+    }
+  }
+}
+
+void graphd_constraint_set_parent(graphd_constraint* con,
+                                  graphd_constraint* parent) {
+  graphd_constraint* old_parent = con->con_parent;
+
+  con->con_parent = parent;
+  set_branch_parents(con, old_parent, parent);
+}
+
 void graphd_constraint_free(graphd_request* greq, graphd_constraint* con) {
   graphd_constraint *sub, *sub_next;
   graphd_constraint_or *cor, *cor_next;
@@ -171,6 +199,15 @@ void graphd_constraint_free(graphd_request* greq, graphd_constraint* con) {
     graphd_constraint_free(greq, con->con_anchor_dup);
 
   pdb_iterator_destroy(g->g_pdb, &con->con_it);
+
+  /*  A <-path constraint's step templates, and its search state.
+   */
+  if (con->con_path) {
+    pdb_iterator_destroy(g->g_pdb, &con->con_path_it);
+    graphd_constraint_free(greq, con->con_step);
+    graphd_constraint_free(greq, con->con_step_walk);
+    con->con_step = con->con_step_walk = NULL;
+  }
 
   /*  "Or" alternatives do not free their subconstraints;
    *  they're considered part of their non-alternative

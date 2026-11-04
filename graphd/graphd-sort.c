@@ -512,6 +512,15 @@ static int sort_precompare_pr_loc(graphd_sort_context *gsc,
           pr_guid = graph_guid_null;
         goto have_guid;
 
+      case GRAPHD_PATTERN_PATH:
+      case GRAPHD_PATTERN_STEPS:
+      case GRAPHD_PATTERN_VIA:
+      case GRAPHD_PATTERN_PATH_COUNT:
+      case GRAPHD_PATTERN_PATH_LIST:
+        /*  Path results (graphd-read-path.c): compare computed values.
+         */
+        goto unknown;
+
       case GRAPHD_PATTERN_VALUE:
         pr_str = pdb_primitive_value_get_memory(pr);
         pr_str_n = pdb_primitive_value_get_size(pr);

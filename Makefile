@@ -341,6 +341,7 @@ GRAPHD_SRCS = \
 	graphd/graphd-read-base.c \
 	graphd/graphd-read-base-evaluate.c \
 	graphd/graphd-read-one.c \
+	graphd/graphd-read-path.c \
 	graphd/graphd-read-or.c \
 	graphd/graphd-read-set.c \
 	graphd/graphd-read-set-count.c \

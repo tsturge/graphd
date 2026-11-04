@@ -2,8 +2,9 @@
 #
 # Path search syntax: "<-path", "step=(...)", "*", "steps", "pathlimit",
 # the "path", "via", "steps" and "path-count" results, and lists of
-# paths, a third level of result list. Paths parse but are not evaluated
-# yet, so the well-formed ones fail with "not implemented yet".
+# paths, a third level of result list. The well-formed queries run on a
+# graph of one node, and find nothing; path-tree, path-grid,
+# path-coauthor and path-semantics test what paths find.
 
 B=`basename $0 .sh`
 cd `dirname $0`

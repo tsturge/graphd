@@ -1,8 +1,8 @@
 # Path search in graphd: a proposal
 
-Status: the syntax parses (branch `path-search`); evaluation is not
-implemented yet, and a well-formed path query fails with `SEMANTICS
-path search (<-path) is not implemented yet`.
+Status (branch `path-search`): implemented, searching from one end
+(`graphd/graphd-read-path.c`); searching from both ends, resuming a
+search with a cursor, and MQL are still to come.
 
 ## Why
 
@@ -219,6 +219,13 @@ paths.
 - **Steps.** A step template is evaluated as a subconstraint is, with
   its root bound to the current frontier, a guid set: the cost of a
   level is the cost of today's join over that set.
+- **Alternatives.** A step's `{ } | { }` alternatives are different
+  ways to step, and a step goes every way that matches. (Elsewhere, an
+  "or" is satisfied by its first alternative whose subconstraints
+  match, and graphd doesn't look at the rest; so walking evaluates the
+  step once for each combination of its alternatives, and a step can
+  have at most 8 "or"s.) `via`, the step evaluated with both its ends
+  bound, shows the first alternative that matches, as any read would.
 - **Paths.** `path` begins with the start and ends with the match. A
   step back to a node already reached is ignored, so paths don't
   revisit nodes.
@@ -280,9 +287,38 @@ a breadth-first search that follows this document, and checks the model
 against graphd as it is today: the guid of every write; every step of
 every expected path, read with its ends bound (that reply is also its
 `via`); and every distance, by nesting the step template that many
-times (it must reach the match) and one fewer (it must not). They are
-listed in `test/unit/pending`, which `make test` reports separately,
-until evaluation is implemented.
+times (it must reach the match) and one fewer (it must not). They pass
+since evaluation was implemented.
+
+## Implementation
+
+`graphd/graphd-read-path.c` has the overview. In short:
+
+- **Two copies of each step.** graphd can't copy a constraint tree, so
+  the parser records a step's tokens and parses them twice: `con_step`
+  keeps the query's result patterns, for `via`; `con_step_walk` is
+  rewritten to walk, its root returning its guid and contents, its `*`
+  its guid, and nothing paged short.
+- **Compiling.** `<-path` constraints aren't linked to their parents
+  the way other subconstraints are, so `graphd_read_push()` compiles
+  them, and their two templates, as trees of their own.
+- **Searching.** When `graphd_read_one()` reaches a `<-path`
+  subconstraint, it pushes a path search instead of a read-set. The
+  search walks level by level, evaluating the walking template with its
+  root bound to up to 1,000 frontier nodes at a time (a fixed iterator),
+  and records each new node's distance and predecessors. It then
+  evaluates the `<-path` constraint as an ordinary read-set over the
+  nodes reached, with an implicit `sort=(steps guid)`, so its own
+  constraints, paging, sort and count work as for any constraint.
+- **Results.** `path`, `steps`, `path-count` and lists of paths are
+  computed from the search's state (`graphd_read_path_value()`); a list
+  of paths is turned into a single pattern atom, so the rest of graphd
+  sees two levels of list. Before delivering a match, `graphd_read_one()`
+  computes the `via` of its paths' steps: the query's template, its root
+  bound to the step's start and its `*` to the step's end.
+- **Limits.** A template constraint pages through at most 65,536
+  results for each node, graphd's limit on an explicit page size, so a
+  node with more links than that in one step is walked partly.
 
 ## Implementation plan
 
@@ -292,13 +328,9 @@ until evaluation is implemented.
    `con_pathlimit`) and pattern types (`GRAPHD_PATTERN_PATH`,
    `GRAPHD_PATTERN_STEPS`, `GRAPHD_PATTERN_VIA`,
    `GRAPHD_PATTERN_PATH_COUNT`) in graphd; the checks above;
-   `test/unit/path-parse.sh`. Tests for evaluation (done, pending).
-   Evaluation will also need graphd's two-level limit on result lists
-   (`parenthesize_pattern`) to allow a list of paths.
-2. Evaluation, one end: a read-set for `<-path` constraints that keeps a
-   frontier and a visited set, evaluates the step template with its root
-   bound to the frontier, and yields matches level by level, with each
-   node's predecessor, for `path`, `via` and `steps`.
+   `test/unit/path-parse.sh`. Tests for evaluation (done).
+2. Evaluation, one end (done): see Implementation above; the four
+   evaluation tests pass.
 3. Cost and paging: charge the search to the request's cost allowance;
    cursors that resume a search.
 4. Both ends: reverse a step template, and search from both ends when

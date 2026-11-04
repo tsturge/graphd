@@ -339,6 +339,13 @@ int graphd_pattern_from_primitive(graphd_request *greq,
     case GRAPHD_PATTERN_ITERATOR:
       return GRAPHD_ERR_NO;
 
+    case GRAPHD_PATTERN_PATH:
+    case GRAPHD_PATTERN_STEPS:
+    case GRAPHD_PATTERN_VIA:
+    case GRAPHD_PATTERN_PATH_COUNT:
+    case GRAPHD_PATTERN_PATH_LIST:
+      return graphd_read_path_value(greq, con, pat, pr, val_out);
+
     case GRAPHD_PATTERN_ARCHIVAL:
       cl_cover(cl);
       graphd_value_boolean_set(val_out, pdb_primitive_is_archival(pr));
@@ -709,6 +716,8 @@ char const *graphd_pattern_type_to_string(graphd_pattern_type pat, char *buf,
       return "via";
     case GRAPHD_PATTERN_PATH_COUNT:
       return "path-count";
+    case GRAPHD_PATTERN_PATH_LIST:
+      return "list of paths";
   }
 
   snprintf(buf, size, "unexpected pattern %x", pat);

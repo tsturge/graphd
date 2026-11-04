@@ -200,7 +200,7 @@ static void graphd_semantic_constraint_complete_subtree(
 
   /* - If we have a parent constraint, we know how we relate to it.
    */
-  if (con->con_parent != NULL && !con->con_linkage) {
+  if (con->con_parent != NULL && !con->con_linkage && !con->con_path) {
     cl_cover(cl);
     graphd_request_errprintf(greq, 0,
                              "SEMANTICS don't know"
@@ -519,8 +519,9 @@ static bool path_check(graphd_request *greq, graphd_constraint const *con,
   return true;
 }
 
-void graphd_semantic_constraint_complete(graphd_request *greq,
-                                         graphd_constraint *con) {
+static void semantic_constraint_complete(graphd_request *greq,
+                                         graphd_constraint *con,
+                                         bool check_paths) {
   int err;
   cl_handle *const cl = graphd_request_cl(greq);
   bool has_path = false;
@@ -529,14 +530,15 @@ void graphd_semantic_constraint_complete(graphd_request *greq,
 
   cl_assert(cl, con != NULL);
 
-  /*  Paths parse, but can't be evaluated yet.
+  /*  Check the use of paths, and prepare <-path constraints and their
+   *  step templates for evaluation.
    */
-  if (con->con_parent == NULL) {
+  if (con->con_parent == NULL && check_paths) {
     if (!path_check(greq, con, false, &has_path)) return;
-    if (has_path) {
-      graphd_request_errprintf(greq, false,
-                               "SEMANTICS path search (<-path) is not "
-                               "implemented yet");
+    if (has_path && (err = graphd_read_path_semantic(greq, con)) != 0) {
+      if (!graphd_request_has_error(greq))
+        graphd_request_errprintf(greq, 0, "SYSTEM can't prepare paths: %s",
+                                 graphd_strerror(err));
       return;
     }
   }
@@ -559,6 +561,18 @@ void graphd_semantic_constraint_complete(graphd_request *greq,
     }
   }
   con->con_title = NULL;
+}
+
+void graphd_semantic_constraint_complete(graphd_request *greq,
+                                         graphd_constraint *con) {
+  semantic_constraint_complete(greq, con, true);
+}
+
+/*  A path's step template, completed as the root of a request.
+ */
+void graphd_semantic_constraint_complete_template(graphd_request *greq,
+                                                  graphd_constraint *con) {
+  semantic_constraint_complete(greq, con, false);
 }
 
 /*
