@@ -16,9 +16,138 @@ limitations under the License.
 
 #include <errno.h>
 #include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef GRAPHD_PATH_CHECK_MEMORY
+
+/*  A test build (-DGRAPHD_PATH_CHECK_MEMORY) counts the blocks and hash
+ *  tables this module allocates on each request's heap, and
+ *  graphd_read_path_check_memory() aborts, saying where they came from,
+ *  if any are left when the request ends.  (The request heap would
+ *  otherwise free them silently.)
+ */
+#define PATH_TRACKED (1 << 20) /* a power of two */
+static struct {
+  cm_handle *pt_cm; /* NULL: a free slot */
+  void const *pt_key; /* the block, or the hash table */
+  int pt_line;
+  bool pt_deleted;
+} path_tracked[PATH_TRACKED];
+
+static size_t path_slot(void const *key) {
+  return (size_t)(((unsigned long long)(uintptr_t)key >> 4) *
+                  0x9E3779B97F4A7C15ull >> 20) &
+         (PATH_TRACKED - 1);
+}
+
+static void path_track(cm_handle *cm, void const *key, int line) {
+  size_t i, n;
+  for (i = path_slot(key), n = 0; n < PATH_TRACKED;
+       i = (i + 1) & (PATH_TRACKED - 1), n++)
+    if (path_tracked[i].pt_cm == NULL) {
+      path_tracked[i].pt_cm = cm;
+      path_tracked[i].pt_key = key;
+      path_tracked[i].pt_line = line;
+      path_tracked[i].pt_deleted = false;
+      return;
+    }
+  fprintf(stderr, "graphd-read-path: too many blocks to track\n");
+  abort();
+}
+
+static void path_untrack(void const *key) {
+  size_t i, n;
+  for (i = path_slot(key), n = 0; n < PATH_TRACKED;
+       i = (i + 1) & (PATH_TRACKED - 1), n++) {
+    if (path_tracked[i].pt_cm == NULL && !path_tracked[i].pt_deleted) break;
+    if (path_tracked[i].pt_cm != NULL && path_tracked[i].pt_key == key) {
+      path_tracked[i].pt_cm = NULL;
+      path_tracked[i].pt_deleted = true;
+      return;
+    }
+  }
+  fprintf(stderr, "graphd-read-path: freeing untracked %p\n", key);
+  abort();
+}
+
+static void *path_realloc(cm_handle *cm, void *p, size_t n, char const *file,
+                          int line) {
+  void *q = (*cm->cm_realloc_loc)(cm, p, n, file, line);
+  if (p != NULL && (n == 0 || q != NULL)) path_untrack(p);
+  if (n != 0 && q != NULL) path_track(cm, q, line);
+  return q;
+}
+
+static void *path_zalloc(cm_handle *cm, size_t n, char const *file,
+                         int line) {
+  void *p = path_realloc(cm, NULL, n, file, line);
+  if (p != NULL) memset(p, 0, n);
+  return p;
+}
+
+static int path_hashinit(cm_handle *cm, cm_hashtable *h, size_t elsize,
+                         int m) {
+  int err = cm_hashinit(cm, h, elsize, m);
+  if (err == 0) path_track(cm, h, 0);
+  return err;
+}
+
+static void path_hashfinish(cm_hashtable *h) {
+  path_untrack(h);
+  cm_hashfinish(h);
+}
+
+/*  A hash table copied to a new address, which will finish it.
+ */
+static void path_table_moved(void const *from, void const *to) {
+  size_t i, n;
+  cm_handle *cm = NULL;
+  for (i = path_slot(from), n = 0; n < PATH_TRACKED;
+       i = (i + 1) & (PATH_TRACKED - 1), n++)
+    if (path_tracked[i].pt_cm != NULL && path_tracked[i].pt_key == from) {
+      cm = path_tracked[i].pt_cm;
+      break;
+    }
+  path_untrack(from);
+  path_track(cm, to, 0);
+}
+
+#undef cm_malloc
+#undef cm_realloc
+#undef cm_free
+#undef cm_zalloc
+#define cm_malloc(h, n) path_realloc((h), NULL, (n), __FILE__, __LINE__)
+#define cm_realloc(h, p, n) path_realloc((h), (p), (n), __FILE__, __LINE__)
+#define cm_free(h, p) ((void)path_realloc((h), (p), 0, __FILE__, __LINE__))
+#define cm_zalloc(h, n) path_zalloc((h), (n), __FILE__, __LINE__)
+#define cm_hashinit path_hashinit
+#define cm_hashfinish path_hashfinish
+
+void graphd_read_path_check_memory(graphd_request *greq) {
+  cm_handle *cm = greq->greq_req.req_cm;
+  bool left = false;
+  size_t i;
+
+  for (i = 0; i < PATH_TRACKED; i++)
+    if (path_tracked[i].pt_cm == cm) {
+      left = true;
+      fprintf(stderr, "graphd-read-path: %s from line %d left at the end "
+              "of a request\n",
+              path_tracked[i].pt_line ? "block" : "hash table",
+              path_tracked[i].pt_line);
+    }
+  if (left) abort();
+}
+
+#else
+
+#define path_table_moved(from, to) ((void)0)
+void graphd_read_path_check_memory(graphd_request *greq) {}
+
+#endif
 
 /*  Path search: "<-path" constraints (doc/path-proposal.md).
  *
@@ -96,6 +225,11 @@ limitations under the License.
 #define GRAPHD_PATH_FAST_BATCH 200
 #define GRAPHD_PATH_ROUTE_MAX 16
 
+/*  Primitives a chain walk reads in one turn: graphd checks a request's
+ *  cost allowance between turns, so they mustn't run long.
+ */
+#define GRAPHD_PATH_TURN_READS 20000
+
 /*  Most matches searched for from both ends, one at a time.
  */
 #define GRAPHD_PATH_TARGETS_MAX 64
@@ -138,7 +272,6 @@ typedef struct graphd_read_path_context {
 
   graphd_constraint *grp_con;
   pdb_id grp_parent_id;
-  pdb_primitive const *grp_parent_pr;
 
   graphd_read_set_callback *grp_callback;
   void *grp_callback_data;
@@ -170,11 +303,17 @@ typedef struct graphd_read_path_context {
    */
   cm_hashtable grp_memo;
   bool grp_memo_valid;
+  unsigned long grp_turn_reads; /* primitives read this turn */
 
   /*  Searching from both ends: the search back from the match.  Its
    *  nodes' pn_dist is their distance to the match, and pn_preds the
    *  nodes found one step further back from them.
    */
+  /*  Set if nothing can match: the <-path constraint names nodes with
+   *  guid=, and none is a node but the start; or its iterator is empty.
+   */
+  bool grp_no_match;
+
   bool grp_two;
   bool grp_two_back; /* the current level grows the back search */
   pdb_id grp_two_end;
@@ -192,7 +331,6 @@ typedef struct graphd_read_path_context {
   bool grp_page_known;
   bool grp_page;
   unsigned long long grp_page_found;
-  pdb_iterator *grp_page_it;
   cm_hashtable grp_back;
   bool grp_back_valid;
   unsigned long grp_blevel;
@@ -377,7 +515,8 @@ int graphd_read_path_semantic(graphd_request *greq, graphd_constraint *con) {
 
   for (sub = con->con_head; sub != NULL; sub = sub->con_next)
     if ((err = graphd_read_path_semantic(greq, sub)) != 0) return err;
-  if (!con->con_path) return 0;
+  if (!con->con_path || con->con_path_prepared) return 0;
+  con->con_path_prepared = true;
 
   con->con_no_defer = true;
   path_list_mark(con, con->con_result, 0);
@@ -422,8 +561,25 @@ int graphd_read_path_semantic(graphd_request *greq, graphd_constraint *con) {
   return 0;
 }
 
+/**
+ * @brief Free what a <-path constraint keeps for evaluating paths.
+ */
+void graphd_read_path_constraint_free(graphd_request *greq,
+                                      graphd_constraint *con) {
+  cm_handle *cm = greq->greq_req.req_cm;
+
+  if (con->con_path_ors != NULL) cm_free(cm, con->con_path_ors);
+  if (con->con_path_route != NULL) cm_free(cm, con->con_path_route);
+  con->con_path_ors = NULL;
+  con->con_path_route = NULL;
+  con->con_path_ors_n = con->con_path_route_n = 0;
+  con->con_path_route_known = false;
+}
+
 /* ---------------------------------------------------------------- */
 /*  The search's state                                               */
+
+static void run_destroy(graphd_request *greq, graphd_path_run *run);
 
 static graphd_path_run *run_create(graphd_request *greq, pdb_id start) {
   cm_handle *cm = greq->greq_req.req_cm;
@@ -432,11 +588,20 @@ static graphd_path_run *run_create(graphd_request *greq, pdb_id start) {
 
   if ((run = cm_zalloc(cm, sizeof(*run))) == NULL) return NULL;
   run->pr_start = start;
-  if (cm_hashinit(cm, &run->pr_nodes, sizeof(graphd_path_node), 10) != 0 ||
-      cm_hashinit(cm, &run->pr_via, sizeof(graphd_value), 6) != 0)
+  if (cm_hashinit(cm, &run->pr_nodes, sizeof(graphd_path_node), 10) != 0) {
+    cm_free(cm, run);
     return NULL;
+  }
+  if (cm_hashinit(cm, &run->pr_via, sizeof(graphd_value), 6) != 0) {
+    cm_hashfinish(&run->pr_nodes);
+    cm_free(cm, run);
+    return NULL;
+  }
   pn = cm_hnew(&run->pr_nodes, graphd_path_node, &start, sizeof start);
-  if (pn == NULL) return NULL;
+  if (pn == NULL) {
+    run_destroy(greq, run);
+    return NULL;
+  }
   pn->pn_dist = 0;
   pn->pn_count = 1;
   return run;
@@ -805,6 +970,7 @@ static int fast_next(graphd_read_path_context *grp, size_t i, pdb_id id,
     pdb_primitive_linkage_get(pr, linkage, guid);
     if ((err = pdb_id_from_guid(pdb, &cid, &guid)) != 0)
       return err == PDB_ERR_NO ? 0 : err;
+    grp->grp_turn_reads++;
     if ((err = pdb_id_read(pdb, cid, &cpr)) != 0) return err;
     err = graphd_match_intrinsics(greq, next, &cpr);
     if (err == 0) err = fast_step(grp, i + 1, cid, &cpr, ids, n, m);
@@ -819,6 +985,7 @@ static int fast_next(graphd_read_path_context *grp, size_t i, pdb_id id,
                                 PDB_ITERATOR_HIGH_ANY, true, false, &it);
   if (err != 0) return err == PDB_ERR_NO ? 0 : err;
   while ((err = pdb_iterator_next_nonstep(pdb, it, &cid)) == 0) {
+    grp->grp_turn_reads++;
     if ((err = pdb_id_read(pdb, cid, &cpr)) != 0) break;
     err = graphd_match_intrinsics(greq, next, &cpr);
     if (err == 0) err = fast_step(grp, i + 1, cid, &cpr, ids, n, m);
@@ -855,7 +1022,10 @@ static int fast_step(graphd_read_path_context *grp, size_t i, pdb_id id,
       return err;
     }
     pm = cm_hnew(&grp->grp_memo, path_memo, key, sizeof key);
-    if (pm == NULL) return ENOMEM;
+    if (pm == NULL) {
+      if (found != NULL) cm_free(cm, found);
+      return ENOMEM;
+    }
     pm->pm_ids = found;
     pm->pm_n = found_n;
   }
@@ -884,7 +1054,10 @@ static int fast_walk(graphd_read_path_context *grp) {
   end = grp->grp_chunk + GRAPHD_PATH_FAST_BATCH;
   if (end > grp->grp_frontier_n) end = grp->grp_frontier_n;
 
-  for (; err == 0 && grp->grp_chunk < end; grp->grp_chunk++) {
+  grp->grp_turn_reads = 0;
+  for (; err == 0 && grp->grp_chunk < end &&
+         grp->grp_turn_reads < GRAPHD_PATH_TURN_READS;
+       grp->grp_chunk++) {
     x = grp->grp_frontier[grp->grp_chunk];
     if ((err = pdb_id_read(pdb, x, &pr)) != 0) break;
     n = 0;
@@ -937,6 +1110,7 @@ static int back_prev(graphd_read_path_context *grp, size_t i, pdb_id id,
     pdb_primitive_linkage_get(pr, linkage, guid);
     if ((err = pdb_id_from_guid(pdb, &pid, &guid)) != 0)
       return err == PDB_ERR_NO ? 0 : err;
+    grp->grp_turn_reads++;
     if ((err = pdb_id_read(pdb, pid, &ppr)) != 0) return err;
     err = graphd_match_intrinsics(greq, prev, &ppr);
     if (err == 0) err = back_step(grp, i - 1, pid, &ppr, ids, n, m);
@@ -951,6 +1125,7 @@ static int back_prev(graphd_read_path_context *grp, size_t i, pdb_id id,
                                 PDB_ITERATOR_HIGH_ANY, true, false, &it);
   if (err != 0) return err == PDB_ERR_NO ? 0 : err;
   while ((err = pdb_iterator_next_nonstep(pdb, it, &pid)) == 0) {
+    grp->grp_turn_reads++;
     if ((err = pdb_id_read(pdb, pid, &ppr)) != 0) break;
     err = graphd_match_intrinsics(greq, prev, &ppr);
     if (err == 0) err = back_step(grp, i - 1, pid, &ppr, ids, n, m);
@@ -983,7 +1158,10 @@ static int back_step(graphd_read_path_context *grp, size_t i, pdb_id id,
       return err;
     }
     pm = cm_hnew(&grp->grp_memo, path_memo, key, sizeof key);
-    if (pm == NULL) return ENOMEM;
+    if (pm == NULL) {
+      if (found != NULL) cm_free(cm, found);
+      return ENOMEM;
+    }
     pm->pm_ids = found;
     pm->pm_n = found_n;
   }
@@ -1029,7 +1207,10 @@ static int back_walk(graphd_read_path_context *grp) {
 
   end = grp->grp_bchunk + GRAPHD_PATH_FAST_BATCH;
   if (end > grp->grp_bfrontier_n) end = grp->grp_bfrontier_n;
-  for (; err == 0 && grp->grp_bchunk < end; grp->grp_bchunk++) {
+  grp->grp_turn_reads = 0;
+  for (; err == 0 && grp->grp_bchunk < end &&
+         grp->grp_turn_reads < GRAPHD_PATH_TURN_READS;
+       grp->grp_bchunk++) {
     v = grp->grp_bfrontier[grp->grp_bchunk];
     if ((err = pdb_id_read(pdb, v, &pr)) != 0) break;
     n = 0;
@@ -1069,14 +1250,15 @@ static int two_paths(graphd_read_path_context *grp, unsigned long dist) {
 
   if (cm_hashinit(cm, &nodes, sizeof(graphd_path_node), 10) != 0)
     return ENOMEM;
+  err = ENOMEM;
 
   /*  From the match back towards the start.
    */
   pn = cm_hnew(&nodes, graphd_path_node, &grp->grp_two_end, sizeof(pdb_id));
-  if (pn == NULL) return ENOMEM;
+  if (pn == NULL) goto fail;
   pn->pn_dist = dist;
   if ((err = ids_append(cm, &queue, &queue_n, &queue_m, grp->grp_two_end)))
-    return err;
+    goto fail;
 
   for (qi = 0; qi < queue_n; qi++) {
     v = queue[qi];
@@ -1089,7 +1271,7 @@ static int two_paths(graphd_read_path_context *grp, unsigned long dist) {
       for (j = 0; j < fn->pn_preds_n; j++)
         if ((err = ids_append(cm, &pn->pn_preds, &pn->pn_preds_n,
                               &pn->pn_preds_m, fn->pn_preds[j])) != 0)
-          return err;
+          goto fail;
     } else if (pn->pn_dist > grp->grp_level && bn != NULL &&
                bn->pn_dist == dist - pn->pn_dist) {
       for (j = 0; j < bn->pn_preds_n; j++) {
@@ -1097,7 +1279,7 @@ static int two_paths(graphd_read_path_context *grp, unsigned long dist) {
         if (un != NULL && un->pn_dist == bn->pn_dist + 1 &&
             (err = ids_append(cm, &pn->pn_preds, &pn->pn_preds_n,
                               &pn->pn_preds_m, bn->pn_preds[j])) != 0)
-          return err;
+          goto fail;
       }
     }
     for (j = 0; j < pn->pn_preds_n; j++) {
@@ -1105,19 +1287,26 @@ static int two_paths(graphd_read_path_context *grp, unsigned long dist) {
       if (cm_haccess(&nodes, graphd_path_node, &u, sizeof u) != NULL) continue;
       /*  (cm_hnew may move nothing: values stay where they are.) */
       un = cm_hnew(&nodes, graphd_path_node, &u, sizeof u);
-      if (un == NULL) return ENOMEM;
+      if (un == NULL) {
+        err = ENOMEM;
+        goto fail;
+      }
       un->pn_dist = pn->pn_dist - 1;
       if ((err = ids_append(cm, &queue, &queue_n, &queue_m, u)) != 0)
-        return err;
+        goto fail;
     }
   }
   cm_free(cm, queue);
+  queue = NULL;
 
   /*  Keep the nodes that reach the start, nearest first: a node is on a
    *  path if one of its predecessors is.  (pn_count marks them.)
    */
   order = cm_malloc(cm, (cm_hashnelems(&nodes) + 1) * sizeof(*order));
-  if (order == NULL) return ENOMEM;
+  if (order == NULL) {
+    err = ENOMEM;
+    goto fail;
+  }
   pn = NULL;
   while ((pn = cm_hnext(&nodes, graphd_path_node, pn)) != NULL)
     order[order_n++] = pn;
@@ -1150,6 +1339,7 @@ static int two_paths(graphd_read_path_context *grp, unsigned long dist) {
       pn->pn_count = (pn->pn_dist == 0);
   }
   cm_free(cm, order);
+  order = NULL;
 
   /*  Add them to the paths found so far.  A node on paths to several
    *  targets is at the same distance from the start, with the same
@@ -1161,14 +1351,30 @@ static int two_paths(graphd_read_path_context *grp, unsigned long dist) {
     if (cm_haccess(&grp->grp_paths, graphd_path_node, &id, sizeof id) !=
         NULL) {
       if (pn->pn_preds != NULL) cm_free(cm, pn->pn_preds);
+      pn->pn_preds = NULL;
       continue;
     }
     un = cm_hnew(&grp->grp_paths, graphd_path_node, &id, sizeof id);
-    if (un == NULL) return ENOMEM;
+    if (un == NULL) {
+      /*  This node's predecessors, and the rest's, are freed below.
+       */
+      err = ENOMEM;
+      goto fail;
+    }
     *un = *pn;
+    pn->pn_preds = NULL; /* now grp_paths' */
   }
   cm_hashfinish(&nodes);
   return 0;
+
+fail:
+  pn = NULL;
+  while ((pn = cm_hnext(&nodes, graphd_path_node, pn)) != NULL)
+    if (pn->pn_preds != NULL) cm_free(cm, pn->pn_preds);
+  cm_hashfinish(&nodes);
+  if (queue != NULL) cm_free(cm, queue);
+  if (order != NULL) cm_free(cm, order);
+  return err;
 }
 
 /*  All targets are done: their paths replace the search's nodes.
@@ -1190,6 +1396,7 @@ static int two_finish(graphd_read_path_context *grp) {
     if (pn->pn_preds != NULL) cm_free(cm, pn->pn_preds);
   cm_hashfinish(&run->pr_nodes);
   run->pr_nodes = grp->grp_paths;
+  path_table_moved(&grp->grp_paths, &run->pr_nodes);
   grp->grp_paths_valid = false;
   return 0;
 }
@@ -1408,7 +1615,10 @@ static int targets_from_iterator(graphd_read_path_context *grp) {
         break;
     }
     if (err == PDB_ERR_NO) err = 0;
-    if (seen > GRAPHD_PATH_TARGETS_MAX) grp->grp_targets_n = 0;
+    if (seen > GRAPHD_PATH_TARGETS_MAX)
+      grp->grp_targets_n = 0;
+    else if (err == 0 && grp->grp_targets_n == 0)
+      grp->grp_no_match = true;
   }
   pdb_iterator_destroy(pdb, &it);
   grp->grp_targets_left = grp->grp_targets_n;
@@ -1424,6 +1634,7 @@ static int page_full(graphd_read_path_context *grp, bool *full) {
   graphd_request *greq = grp->grp_base->grb_greq;
   pdb_handle *pdb = graphd_request_graphd(greq)->g_pdb;
   graphd_constraint *con = grp->grp_con;
+  pdb_iterator *it = NULL;
   pdb_budget budget;
   pdb_primitive pr;
   size_t i;
@@ -1435,38 +1646,40 @@ static int page_full(graphd_read_path_context *grp, bool *full) {
     grp->grp_page_known = true;
     grp->grp_page = con->con_pagesize_valid && con->con_sort_default_path &&
                     con->con_cursor_s == NULL && con->con_subcon_n == 0;
-    if (grp->grp_page && con->con_it != NULL) {
-      if ((err = pdb_iterator_clone(pdb, con->con_it, &grp->grp_page_it)))
-        return err;
-      do {
-        budget = PDB_COST_HIGH;
-        err = pdb_iterator_statistics(pdb, grp->grp_page_it, &budget);
-      } while (err == PDB_ERR_MORE);
-      if (err != 0) return err;
-    }
   }
   if (!grp->grp_page) return 0;
+  if (con->con_steps.countcon_min_valid &&
+      grp->grp_level < con->con_steps.countcon_min)
+    return 0;
 
-  /*  The nodes this level reached.
+  /*  The nodes this level reached.  (The iterator lasts only this turn:
+   *  the request may be suspended between turns.)
    */
-  if (!con->con_steps.countcon_min_valid ||
-      grp->grp_level >= con->con_steps.countcon_min)
-    for (i = 0; i < grp->grp_frontier_n; i++) {
-      id = grp->grp_frontier[i];
-      if (grp->grp_page_it != NULL &&
-          (err = pdb_iterator_check_nonstep(pdb, grp->grp_page_it, id)) != 0) {
-        if (err != GRAPHD_ERR_NO) return err;
-        continue;
-      }
-      if ((err = pdb_id_read(pdb, id, &pr)) != 0) return err;
-      err = graphd_match_intrinsics(greq, con, &pr);
-      pdb_primitive_finish(pdb, &pr);
-      if (err == GRAPHD_ERR_NO) continue;
-      if (err != 0) return err;
-      grp->grp_page_found++;
+  if (con->con_it != NULL) {
+    if ((err = pdb_iterator_clone(pdb, con->con_it, &it)) != 0) return err;
+    do {
+      budget = PDB_COST_HIGH;
+      err = pdb_iterator_statistics(pdb, it, &budget);
+    } while (err == PDB_ERR_MORE);
+  }
+  for (i = 0; err == 0 && i < grp->grp_frontier_n; i++) {
+    id = grp->grp_frontier[i];
+    if (it != NULL && (err = pdb_iterator_check_nonstep(pdb, it, id)) != 0) {
+      if (err == GRAPHD_ERR_NO) err = 0;
+      continue;
     }
-  *full = grp->grp_page_found >= con->con_start + con->con_pagesize;
-  return 0;
+    if ((err = pdb_id_read(pdb, id, &pr)) != 0) break;
+    err = graphd_match_intrinsics(greq, con, &pr);
+    pdb_primitive_finish(pdb, &pr);
+    if (err == GRAPHD_ERR_NO) {
+      err = 0;
+      continue;
+    }
+    if (err == 0) grp->grp_page_found++;
+  }
+  if (it != NULL) pdb_iterator_destroy(pdb, &it);
+  if (err == 0) *full = grp->grp_page_found >= con->con_start + con->con_pagesize;
+  return err;
 }
 
 static void memo_finish(graphd_read_path_context *grp) {
@@ -1501,8 +1714,13 @@ static int grp_walk(graphd_stack *stack, graphd_stack_context *sc) {
   /*  A chain, and only a few nodes can match: search from both ends.
    */
   if (con->con_path_route_n > 0 && grp->grp_targets_n == 0 &&
-      !grp->grp_targets_tried && (err = targets_from_iterator(grp)) != 0) {
+      !grp->grp_no_match && !grp->grp_targets_tried &&
+      (err = targets_from_iterator(grp)) != 0) {
     grp->grp_err = err;
+    return 0;
+  }
+  if (grp->grp_no_match) {
+    graphd_stack_resume(stack, sc, grp_match);
     return 0;
   }
   if (con->con_path_route_n > 0 && grp->grp_targets_n > 0 &&
@@ -1626,6 +1844,7 @@ static int grp_match(graphd_stack *stack, graphd_stack_context *sc) {
   graphd_constraint *con = grp->grp_con;
   cm_handle *cm = greq->greq_req.req_cm;
   graphd_path_node *pn = NULL;
+  pdb_primitive parent_pr;
   pdb_id *ids = NULL, id;
   size_t n = 0, m = 0;
   int err = grp->grp_err;
@@ -1659,9 +1878,16 @@ static int grp_match(graphd_stack *stack, graphd_stack_context *sc) {
   if (ids != NULL) cm_free(cm, ids);
   if (err != 0) goto err;
 
+  /*  (The parent's primitive is read here, not kept: the request may
+   *  have been suspended since the search began, and the parent's
+   *  read-one context released it.)
+   */
+  if ((err = pdb_id_read(g->g_pdb, grp->grp_parent_id, &parent_pr)) != 0)
+    goto err;
   con->con_path_run = grp->grp_run;
-  graphd_read_set_push(grp->grp_base, con, grp->grp_parent_id,
-                       grp->grp_parent_pr, match_deliver, grp);
+  graphd_read_set_push(grp->grp_base, con, grp->grp_parent_id, &parent_pr,
+                       match_deliver, grp);
+  pdb_primitive_finish(g->g_pdb, &parent_pr);
   return 0;
 
 err:
@@ -1703,7 +1929,6 @@ static void grp_free(graphd_read_path_context *grp) {
       if (pn->pn_preds != NULL) cm_free(cm, pn->pn_preds);
     cm_hashfinish(&grp->grp_paths);
   }
-  if (grp->grp_page_it != NULL) pdb_iterator_destroy(g->g_pdb, &grp->grp_page_it);
   if (grp->grp_bfrontier != NULL) cm_free(cm, grp->grp_bfrontier);
   if (grp->grp_bnext != NULL) cm_free(cm, grp->grp_bnext);
   if (grp->grp_targets != NULL) cm_free(cm, grp->grp_targets);
@@ -1729,11 +1954,29 @@ static void grp_resource_list(void *log_data, void *manager_data,
 static cm_resource_type grp_resource_type = {
     "path search context", grp_resource_free, grp_resource_list};
 
+/*  Suspending: the cached via values may point into the primitive
+ *  table; copy them.  (Nothing else the search keeps does: it holds
+ *  ids, and reads primitives only within a turn.)
+ */
 static int grp_suspend(graphd_stack *stack, graphd_stack_context *sc) {
+  graphd_read_path_context *grp = (void *)sc;
+  graphd_request *greq = grp->grp_base->grb_greq;
+  graphd_value *val = NULL;
+  int err;
+
+  if (grp->grp_run == NULL) return 0;
+  while ((val = cm_hnext(&grp->grp_run->pr_via, graphd_value, val)) != NULL)
+    if ((err = graphd_value_suspend(greq->greq_req.req_cm,
+                                    graphd_request_cl(greq), val)) != 0)
+      return err;
   return 0;
 }
 
 static int grp_unsuspend(graphd_stack *stack, graphd_stack_context *sc) {
+  return 0;
+}
+
+static int grv_suspend(graphd_stack *stack, graphd_stack_context *sc) {
   return 0;
 }
 
@@ -1753,6 +1996,7 @@ static int find_targets(graphd_read_path_context *grp) {
   int err;
 
   if (!gc->guidcon_include_valid || gc->guidcon_include.gs_null) return 0;
+  grp->grp_no_match = true; /* until a target is found */
   for (i = 0; i < gc->guidcon_include.gs_n; i++) {
     if (pdb_id_from_guid(g->g_pdb, &id, gc->guidcon_include.gs_guid + i) != 0 ||
         id == grp->grp_parent_id)
@@ -1760,6 +2004,7 @@ static int find_targets(graphd_read_path_context *grp) {
     if ((err = ids_append(cm, &grp->grp_targets, &grp->grp_targets_n, &m,
                           id)) != 0)
       return err;
+    grp->grp_no_match = false;
   }
   grp->grp_targets_left = grp->grp_targets_n;
   return 0;
@@ -1784,7 +2029,6 @@ void graphd_read_path_push(graphd_read_base *grb, graphd_constraint *con,
   grp->grp_base = grb;
   grp->grp_con = con;
   grp->grp_parent_id = parent_id;
-  grp->grp_parent_pr = parent_pr;
   grp->grp_callback = callback;
   grp->grp_callback_data = callback_data;
   grp->grp_saved_it = con->con_path_it;
@@ -1915,7 +2159,7 @@ static void grv_resource_list(void *log_data, void *manager_data,
 static cm_resource_type grv_resource_type = {
     "path via context", grv_resource_free, grv_resource_list};
 
-static const graphd_stack_type grv_stack_type = {grv_run, grp_suspend,
+static const graphd_stack_type grv_stack_type = {grv_run, grv_suspend,
                                                  grp_unsuspend};
 
 /**

@@ -475,6 +475,9 @@ static bool path_check(graphd_request *greq, graphd_constraint const *con,
     problem = "\"*\" stands alone; constrain the node in the next step";
   else if (con->con_path && in_step)
     problem = "a step=(...) cannot contain another <-path";
+  else if (con->con_path && con->con_parent != NULL &&
+           con->con_parent->con_or != NULL)
+    problem = "a <-path cannot be one of an \"or\"'s alternatives";
   else if (con->con_step != NULL && !con->con_path)
     problem = "step=(...) is only for <-path constraints";
   else if ((con->con_steps.countcon_min_valid ||

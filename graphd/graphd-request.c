@@ -783,6 +783,7 @@ void graphd_request_finish(void *data, srv_handle *srv, void *session_data,
 
   graphd_constraint_free(greq, greq->greq_constraint);
   greq->greq_constraint = NULL;
+  graphd_read_path_check_memory(greq);
 
   /*  At this time, all the iterators in the request
    *  must have been free'd.

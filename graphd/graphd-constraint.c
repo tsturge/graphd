@@ -204,6 +204,7 @@ void graphd_constraint_free(graphd_request* greq, graphd_constraint* con) {
    */
   if (con->con_path) {
     pdb_iterator_destroy(g->g_pdb, &con->con_path_it);
+    graphd_read_path_constraint_free(greq, con);
     graphd_constraint_free(greq, con->con_step);
     graphd_constraint_free(greq, con->con_step_walk);
     con->con_step = con->con_step_walk = NULL;

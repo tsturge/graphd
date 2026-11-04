@@ -251,7 +251,9 @@ paths.
 - A step contains a `*`, and `*` appears only in a step. `*` stands
   alone: what the next node must be is said by the next step, or by the
   `<-path` constraint itself.
-- A step cannot contain another `<-path`.
+- A step cannot contain another `<-path`, and a `<-path` cannot be one
+  of an "or"'s alternatives. (It can be a subconstraint of anything
+  else, including another `<-path` constraint.)
 - `step=`, `steps`, `pathlimit` and the `path`, `via`, `steps` and
   `path-count` results are only for `<-path` constraints.
 - A list of paths holds only `path`, `via` and `steps`; a result has at
@@ -294,7 +296,13 @@ cycles, ties, closed nodes and link history (`path-semantics`); all four
 include lists of paths, and the grid's path counts are checked against
 their closed form.
 
-`test/path/make-tests.py` generates them from a model of each graph and
+`test/unit/path-cases` covers by hand what the generator doesn't:
+`guid=` naming nothing, only the start, or the start among others;
+`<-path` constraints side by side, below another subconstraint, and
+inside another's match; "or"s; other sorts, variables and cursors;
+counts.
+
+`test/path/make-tests.py` generates the others from a model of each graph and
 a breadth-first search that follows this document, and checks the model
 against graphd as it is today: the guid of every write; every step of
 every expected path, read with its ends bound (that reply is also its
@@ -350,6 +358,29 @@ since evaluation was implemented.
 - **Limits.** A template constraint pages through at most 65,536
   results for each node, graphd's limit on an explicit page size, so a
   node with more links than that in one step is walked partly.
+
+### Memory, errors and load
+
+- A path search keeps no pointers into the primitive table across
+  turns, so graphd can suspend it (to let a write through) and resume
+  it; the `via` values it caches are copied when it is suspended. Its
+  turns read at most 20,000 primitives, so that graphd, which checks a
+  request's cost allowance between turns, can stop it.
+- Built with `-DGRAPHD_PATH_CHECK_MEMORY`, graphd tracks every block
+  and hash table the path module allocates on a request's heap, and
+  aborts, naming where each came from, if any is left when the request
+  ends. With AddressSanitizer too, the whole test suite passes:
+
+      make BUILDDIR=out-check \
+          CFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer -w \
+                  -DGRAPHD_PATH_CHECK_MEMORY" \
+          LDFLAGS=-fsanitize=address
+      BUILDDIR=out-check test/run-tests.sh
+
+- `test/path/stress.py --graphd out-check/bin/graphd` runs path
+  queries on a 100 by 100 grid while other connections write, so that
+  graphd suspends the searches part way, and fails if an answer
+  changes or graphd reports anything.
 
 ## Implementation plan
 

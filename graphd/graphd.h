@@ -1298,6 +1298,7 @@ struct graphd_constraint {
    *  it isn't, or hasn't been looked at (con_path_route_known).
    */
   unsigned int con_path_route_known : 1;
+  unsigned int con_path_prepared : 1; /* graphd_read_path_semantic() ran */
   unsigned int con_sort_default_path : 1; /* sort=(steps guid) implied */
   graphd_constraint **con_path_route;
   size_t con_path_route_n;
@@ -4294,6 +4295,9 @@ void graphd_constraint_set_parent(graphd_constraint *_con,
 /* graphd-read-path.c */
 
 int graphd_read_path_semantic(graphd_request *_greq, graphd_constraint *_con);
+void graphd_read_path_check_memory(graphd_request *_greq);
+void graphd_read_path_constraint_free(graphd_request *_greq,
+                                      graphd_constraint *_con);
 int graphd_read_path_value(graphd_request *_greq,
                            graphd_constraint const *_con,
                            graphd_pattern const *_pat,
