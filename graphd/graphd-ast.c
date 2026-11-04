@@ -1306,9 +1306,67 @@ static bool ast_conlist_has_linkage(gdp_output *out, gdp_conlist_t *list) {
   graphd_constraint_clause const *cc;
 
   for (cc = gcon->con_cc_head; cc != NULL; cc = cc->cc_next)
-    if (cc->cc_type == GRAPHD_CC_LINKAGE) return true;
+    if (cc->cc_type == GRAPHD_CC_LINKAGE || cc->cc_type == GRAPHD_CC_PATH)
+      return true;
 
   return false;
+}
+
+static int ast_conlist_set_path(gdp_output *out, gdp_conlist_t *list) {
+  graphd_request *greq = out->out_private;
+  graphd_constraint_clause *cc;
+
+  cc = graphd_constraint_clause_alloc(greq, GRAPHD_CC_PATH);
+  if (cc == NULL) return ENOMEM;
+
+  graphd_constraint_clause_append(list, cc);
+  return 0;
+}
+
+static int ast_conlist_add_step(gdp_output *out, gdp_conlist_t *where,
+                                gdp_conlist_t *list) {
+  graphd_request *greq = out->out_private;
+  graphd_constraint *step = list;
+  graphd_constraint_clause *cc;
+  int err;
+
+  step->con_parent = where;
+
+  err = validate_conlist(out, step);
+  if (err != 0) return err;
+
+  cc = graphd_constraint_clause_alloc(greq, GRAPHD_CC_STEP);
+  if (cc == NULL) return ENOMEM;
+
+  cc->cc_data.cd_subcon = step;
+  graphd_constraint_clause_append(where, cc);
+  return 0;
+}
+
+static int ast_conlist_add_step_end(gdp_output *out, gdp_conlist_t *where) {
+  graphd_request *greq = out->out_private;
+  graphd_constraint_clause *cc;
+
+  cc = graphd_constraint_clause_alloc(greq, GRAPHD_CC_STEP_END);
+  if (cc == NULL) return ENOMEM;
+
+  graphd_constraint_clause_append(where, cc);
+  return 0;
+}
+
+static int ast_conlist_add_steps(gdp_output *out, gdp_conlist_t *where,
+                                 graphd_operator op, unsigned long long val) {
+  graphd_request *greq = out->out_private;
+  graphd_constraint_clause *cc;
+
+  cc = graphd_constraint_clause_alloc(greq, GRAPHD_CC_STEPS);
+  if (cc == NULL) return ENOMEM;
+
+  cc->cc_data.cd_count.count_value = val;
+  cc->cc_data.cd_count.count_op = op;
+
+  graphd_constraint_clause_append(where, cc);
+  return 0;
 }
 
 static int ast_conlist_set_linkage(gdp_output *out, gdp_conlist_t *list,
@@ -1653,6 +1711,10 @@ static void _init_ast_ops(gdp_ast_ops *ops) {
       .conlist_set_meta = ast_conlist_set_meta,
       .conlist_has_meta = ast_conlist_has_meta,
       .conlist_set_linkage = ast_conlist_set_linkage,
+      .conlist_set_path = ast_conlist_set_path,
+      .conlist_add_step = ast_conlist_add_step,
+      .conlist_add_step_end = ast_conlist_add_step_end,
+      .conlist_add_steps = ast_conlist_add_steps,
       .conlist_has_linkage = ast_conlist_has_linkage,
       .conlist_add_valuecomparator = ast_conlist_add_value_comparator,
       .conlist_new_sortcomparator = ast_conlist_new_sortcomparator,

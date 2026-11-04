@@ -43,6 +43,7 @@ typedef enum gdp_token_kind {
   TOK_CBRC,     ///< Closing curly brace
   TOK_BOR,      ///< Binary (single) or
   TOK_LOR,      ///< Logical (double) or
+  TOK_STAR,     ///< Asterisk: where a path step ends
   TOK_CBEGIN,   ///< Begining of comment
   TOK_CEND      ///< End of comment
 } gdp_token_kind;

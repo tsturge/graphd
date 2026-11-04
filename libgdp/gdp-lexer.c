@@ -332,6 +332,9 @@ static int consume_symbol(gdp_input *in, int ch, gdp_token_kind *kind) {
     case '+':
       k = TOK_PLUS;
       break;
+    case '*':
+      k = TOK_STAR;
+      break;
     default:
       return GDP_ERR_LEXICAL;
   }

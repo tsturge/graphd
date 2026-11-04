@@ -31,7 +31,7 @@ static const char *gdp_token_names[] = {
         [TOK_LT] = "LT",     [TOK_LE] = "LE",       [TOK_GT] = "GT",
         [TOK_GE] = "GE",     [TOK_MINUS] = "MINUS", [TOK_PLUS] = "PLUS",
         [TOK_OBRC] = "OBRC", [TOK_CBRC] = "CBRC",   [TOK_BOR] = "BOR",
-        [TOK_LOR] = "LOR",
+        [TOK_LOR] = "LOR",   [TOK_STAR] = "STAR",
 };
 
 bool gdp_token_matches(const gdp_token *tok, const char *img) {

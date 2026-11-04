@@ -384,14 +384,116 @@ static void graphd_semantic_constraint_complete_subtree(
 
 /*  Called after all constraints of an expression are fully parsed.
  */
+#define PATH_PATTERNS \
+  ((1ull << GRAPHD_PATTERN_PATH) | (1ull << GRAPHD_PATTERN_STEPS))
+
+/*  The pattern types in a constraint's result, sort and assignments.
+ */
+static unsigned long long constraint_spectrum(graphd_constraint const *con) {
+  graphd_assignment const *a;
+  unsigned long long res;
+
+  res = graphd_pattern_spectrum(con->con_result) |
+        graphd_pattern_spectrum(con->con_sort);
+  for (a = con->con_assignment_head; a != NULL; a = a->a_next)
+    res |= graphd_pattern_spectrum(a->a_result);
+  return res;
+}
+
+/*  The number of "*" in a step template.
+ */
+static size_t step_end_count(graphd_constraint const *con) {
+  graphd_constraint const *sub;
+  graphd_constraint_or const *cor;
+  size_t n = con->con_step_end;
+
+  for (sub = con->con_head; sub != NULL; sub = sub->con_next)
+    n += step_end_count(sub);
+  for (cor = con->con_or_head; cor != NULL; cor = cor->or_next) {
+    n += step_end_count(&cor->or_head);
+    if (cor->or_tail != NULL) n += step_end_count(cor->or_tail);
+  }
+  return n;
+}
+
+/*  Check the use of paths ("<-path", "step=", "*", "steps", and the
+ *  "path" and "steps" result patterns) below <con>, in a step template
+ *  if <in_step>.  Sets *has_path if there are any.  Returns false
+ *  after reporting an error.
+ */
+static bool path_check(graphd_request *greq, graphd_constraint const *con,
+                       bool in_step, bool *has_path) {
+  graphd_constraint const *sub;
+  graphd_constraint_or const *cor;
+  char const *problem = NULL;
+
+  if (con->con_step_end && !in_step)
+    problem = "\"*\" is only for where a step=(...) ends";
+  else if (con->con_step_end && con->con_subcon_n > 0)
+    problem = "\"*\" stands alone; constrain the node in the next step";
+  else if (con->con_path && in_step)
+    problem = "a step=(...) cannot contain another <-path";
+  else if (con->con_step != NULL && !con->con_path)
+    problem = "step=(...) is only for <-path constraints";
+  else if ((con->con_steps.countcon_min_valid ||
+            con->con_steps.countcon_max_valid) &&
+           !con->con_path)
+    problem = "steps is only for <-path constraints";
+  else if ((constraint_spectrum(con) & PATH_PATTERNS) && !con->con_path)
+    problem = "the path and steps results are only for <-path constraints";
+  else if (con->con_path) {
+    *has_path = true;
+    if (con->con_parent == NULL)
+      problem = "<-path needs a parent to start from";
+    else if (con->con_step == NULL)
+      problem = "<-path needs a step=(...)";
+    else if (con->con_step->con_linkage != 0 ||
+             (con->con_step->con_meta & GRAPHD_META_LINK_BIDI))
+      problem =
+          "a step=(...) is rooted at the node it starts from; "
+          "write its links as subconstraints, step=((<-right ...))";
+    else if (!path_check(greq, con->con_step, true, has_path))
+      return false;
+    else if (step_end_count(con->con_step) == 0)
+      problem = "a step=(...) needs a \"*\" where the step ends";
+  }
+  if (problem != NULL) {
+    graphd_request_errprintf(greq, false, "SEMANTICS %s", problem);
+    return false;
+  }
+
+  for (sub = con->con_head; sub != NULL; sub = sub->con_next)
+    if (!path_check(greq, sub, in_step, has_path)) return false;
+  for (cor = con->con_or_head; cor != NULL; cor = cor->or_next) {
+    if (!path_check(greq, &cor->or_head, in_step, has_path)) return false;
+    if (cor->or_tail != NULL &&
+        !path_check(greq, cor->or_tail, in_step, has_path))
+      return false;
+  }
+  return true;
+}
+
 void graphd_semantic_constraint_complete(graphd_request *greq,
                                          graphd_constraint *con) {
   int err;
   cl_handle *const cl = graphd_request_cl(greq);
+  bool has_path = false;
 
   if (graphd_request_has_error(greq)) return;
 
   cl_assert(cl, con != NULL);
+
+  /*  Paths parse, but can't be evaluated yet.
+   */
+  if (con->con_parent == NULL) {
+    if (!path_check(greq, con, false, &has_path)) return;
+    if (has_path) {
+      graphd_request_errprintf(greq, false,
+                               "SEMANTICS path search (<-path) is not "
+                               "implemented yet");
+      return;
+    }
+  }
 
   /* For each subtree, recursively ...
    */

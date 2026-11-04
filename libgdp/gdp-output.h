@@ -604,6 +604,32 @@ struct gdp_ast_ops {
                               gdp_token const* var, gdp_pattern_t* pat);
 
   /**
+   * Mark a constraint as linked to its parent by a path ("<-path"):
+   * it matches what the parent reaches by one or more steps.
+   */
+  int (*conlist_set_path)(gdp_output* out, gdp_conlist_t* list);
+
+  /**
+   * Add a "step=(...)" constraint: the template for one step of a
+   * path.  Its root is the node a step starts from; @a step contains
+   * exactly one "*", where the step ends.
+   */
+  int (*conlist_add_step)(gdp_output* out, gdp_conlist_t* where,
+                          gdp_conlist_t* step);
+
+  /**
+   * Add a "*" constraint: in a step template, the node where the step
+   * ends and the next one starts.
+   */
+  int (*conlist_add_step_end)(gdp_output* out, gdp_conlist_t* where);
+
+  /**
+   * Add a "steps" constraint, bounding a path's number of steps.
+   */
+  int (*conlist_add_steps)(gdp_output* out, gdp_conlist_t* where,
+                           graphd_operator op, unsigned long long value);
+
+  /**
    * Check whether a meta attribute exists.
    */
   bool (*conlist_has_meta)(gdp_output* out, gdp_conlist_t* list);

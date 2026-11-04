@@ -142,17 +142,19 @@ static void clause_merge_timestamp(graphd_request *greq, graphd_constraint *con,
   if (con->con_timestamp_max < con->con_timestamp_min) con->con_false = true;
 }
 
+/*  Merge a "count" clause into con->con_count, or a "steps" clause into
+ *  con->con_steps: <count>.
+ */
 static void clause_merge_count(graphd_request *greq, graphd_constraint *con,
+                               graphd_count_constraint *count,
                                graphd_constraint_clause *cc) {
   cl_handle *cl = graphd_request_cl(greq);
-  graphd_count_constraint *count;
   unsigned long long val;
 
   /* initialize the boundary condition if the numerical
    * operator implies it; enum values for numerical
    * operators are ordered < <= = >= >
    */
-  count = &con->con_count;
   val = cc->cc_data.cd_count.count_value;
 
   if (cc->cc_data.cd_count.count_op <= GRAPHD_OP_EQ) /* < <= = */
@@ -314,6 +316,25 @@ static void clause_merge_gencon(graphd_request *greq, graphd_constraint *con,
                     (int)cc->cc_data.cd_gencon.gencon_op);
   }
   if (gencon->gencon_max < gencon->gencon_min) con->con_false = true;
+}
+
+static char const *operator_to_string(graphd_operator op) {
+  switch (op) {
+    case GRAPHD_OP_LT:
+      return "<";
+    case GRAPHD_OP_LE:
+      return "<=";
+    case GRAPHD_OP_EQ:
+      return "=";
+    case GRAPHD_OP_GE:
+      return ">=";
+    case GRAPHD_OP_GT:
+      return ">";
+    case GRAPHD_OP_NE:
+      return "!=";
+    default:
+      return "?";
+  }
 }
 
 char const *graphd_constraint_clause_to_string(
@@ -484,6 +505,23 @@ char const *graphd_constraint_clause_to_string(
                                       cc->cc_data.cd_meta, b2, sizeof b2));
       break;
 
+    case GRAPHD_CC_PATH:
+      return "<-path";
+
+    case GRAPHD_CC_STEP:
+      snprintf(buf, size, "{step=%s}",
+               graphd_constraint_to_string(cc->cc_data.cd_subcon));
+      break;
+
+    case GRAPHD_CC_STEP_END:
+      return "*";
+
+    case GRAPHD_CC_STEPS:
+      snprintf(buf, size, "{steps%s%llu}",
+               operator_to_string(cc->cc_data.cd_count.count_op),
+               cc->cc_data.cd_count.count_value);
+      break;
+
     default:
       snprintf(buf, size, "{%p: unexpected cc->cc_type %d}", (void *)cc,
                (int)cc->cc_type);
@@ -574,7 +612,7 @@ int graphd_constraint_clause_merge(graphd_request *greq, graphd_constraint *con,
       break;
 
     case GRAPHD_CC_COUNT:
-      clause_merge_count(greq, con, cc);
+      clause_merge_count(greq, con, &con->con_count, cc);
       break;
 
     case GRAPHD_CC_COUNTLIMIT:
@@ -623,7 +661,7 @@ int graphd_constraint_clause_merge(graphd_request *greq, graphd_constraint *con,
       break;
 
     case GRAPHD_CC_LINKAGE:
-      if (con->con_linkage != 0) {
+      if (con->con_linkage != 0 || con->con_path) {
         graphd_request_errprintf(greq, false,
                                  "SEMANTICS more than one linkage connection");
         return GRAPHD_ERR_SEMANTICS;
@@ -801,6 +839,33 @@ int graphd_constraint_clause_merge(graphd_request *greq, graphd_constraint *con,
       con->con_meta = cc->cc_data.cd_meta;
       break;
 
+    case GRAPHD_CC_PATH:
+      if (con->con_linkage != 0 || con->con_path) {
+        graphd_request_errprintf(greq, false,
+                                 "SEMANTICS more than one linkage connection");
+        return GRAPHD_ERR_SEMANTICS;
+      }
+      con->con_path = true;
+      break;
+
+    case GRAPHD_CC_STEP:
+      if (con->con_step != NULL) {
+        graphd_request_errprintf(greq, false,
+                                 "SEMANTICS more than one step=...");
+        return GRAPHD_ERR_SEMANTICS;
+      }
+      con->con_step = cc->cc_data.cd_subcon;
+      con->con_step->con_parent = con;
+      break;
+
+    case GRAPHD_CC_STEP_END:
+      con->con_step_end = true;
+      break;
+
+    case GRAPHD_CC_STEPS:
+      clause_merge_count(greq, con, &con->con_steps, cc);
+      break;
+
     default:
       cl_notreached(cl,
                     "graphd_constraint_clause_merge: unexpected "
@@ -816,6 +881,22 @@ int graphd_constraint_clause_merge_all(graphd_request *greq,
                                        graphd_constraint *con) {
   int err;
   graphd_constraint_clause *cc;
+
+  /*  "*", where a path step ends, stands alone: the node is
+   *  constrained by the next step, or by the <-path constraint.
+   */
+  for (cc = con->con_cc_head; cc != NULL; cc = cc->cc_next)
+    if (cc->cc_type == GRAPHD_CC_STEP_END) break;
+  if (cc != NULL)
+    for (cc = con->con_cc_head; cc != NULL; cc = cc->cc_next)
+      if (cc->cc_type != GRAPHD_CC_STEP_END &&
+          cc->cc_type != GRAPHD_CC_LINKAGE && cc->cc_type != GRAPHD_CC_META) {
+        graphd_request_errprintf(
+            greq, false,
+            "SEMANTICS \"*\" stands alone; constrain the node in the "
+            "next step");
+        return GRAPHD_ERR_SEMANTICS;
+      }
 
   /*  Merge the parsed subclauses into the semantic constraint
    */

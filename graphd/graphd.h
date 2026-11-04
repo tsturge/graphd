@@ -672,7 +672,13 @@ typedef enum graphd_pattern_type {
   GRAPHD_PATTERN_PICK = 28,
 
   /** @brief Nothing at all. */
-  GRAPHD_PATTERN_NONE = 29
+  GRAPHD_PATTERN_NONE = 29,
+
+  /** @brief A path's nodes, from its parent to the match ("<-path"). */
+  GRAPHD_PATTERN_PATH = 30,
+
+  /** @brief A path's steps: for each, the step template's result. */
+  GRAPHD_PATTERN_STEPS = 31
 
 } graphd_pattern_type;
 
@@ -1229,6 +1235,17 @@ struct graphd_constraint {
   graphd_flag_constraint con_live;
   graphd_count_constraint con_count;
 
+  /*  Paths.  A constraint linked to its parent by "<-path" (con_path)
+   *  matches what the parent reaches by repeating con_step, a template
+   *  whose root is the node a step starts from, as many times as
+   *  con_steps allows.  In the template, the constraint marked "*"
+   *  (con_step_end) is where a step ends and the next one starts.
+   */
+  unsigned int con_path : 1;
+  unsigned int con_step_end : 1;
+  graphd_constraint *con_step;
+  graphd_count_constraint con_steps;
+
   /* datatype/valuetype values */
   unsigned int con_valuetype : 8;
 
@@ -1446,7 +1463,11 @@ typedef enum graphd_constraint_clause_type {
   GRAPHD_CC_TYPE,
   GRAPHD_CC_VALUE,
   GRAPHD_CC_VALTYPE,
-  GRAPHD_CC_VALUECOMPARATOR
+  GRAPHD_CC_VALUECOMPARATOR,
+  GRAPHD_CC_PATH,
+  GRAPHD_CC_STEP,
+  GRAPHD_CC_STEP_END,
+  GRAPHD_CC_STEPS
 
 } graphd_constraint_clause_type;
 

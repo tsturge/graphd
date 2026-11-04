@@ -292,6 +292,7 @@ static graphd_pattern_type lookup_pattern(gdp_token const *tok) {
       if (gdp_token_matches(tok, "none")) return GRAPHD_PATTERN_NONE;
       break;
     case 'p':
+      if (gdp_token_matches(tok, "path")) return GRAPHD_PATTERN_PATH;
       if (gdp_token_matches(tok, "prev")) return GRAPHD_PATTERN_PREVIOUS;
       if (gdp_token_matches(tok, "previous")) return GRAPHD_PATTERN_PREVIOUS;
       break;
@@ -300,6 +301,7 @@ static graphd_pattern_type lookup_pattern(gdp_token const *tok) {
       break;
     case 's':
       if (gdp_token_matches(tok, "scope")) return GRAPHD_PATTERN_SCOPE;
+      if (gdp_token_matches(tok, "steps")) return GRAPHD_PATTERN_STEPS;
       break;
     case 't':
       if (gdp_token_matches(tok, "timestamp")) return GRAPHD_PATTERN_TIMESTAMP;
@@ -518,6 +520,22 @@ fail_conflict_outward:
   //+ fail_conflict_meta:
   //+ 	return notify_error(ctx, GDP_ERR_SEMANTICS, id,
   //+ 		"linkage conflicts with an already defined meta constraint");
+}
+
+/**
+ * "<-path": this constraint is linked to its parent by a path.
+ */
+static int set_path_link(gdp_context *ctx, gdp_token const *id) {
+  gdp_ast_ops const *ast = &ctx->ctx_out->out_ops;
+
+  if (!is_read_request(ctx->ctx_cmd))
+    return notify_error(ctx, GDP_ERR_SEMANTICS, id,
+                        "paths are only allowed in read requests");
+  if (ast->conlist_has_linkage(ctx->ctx_out, ctx->ctx_conlist) ||
+      ast->conlist_has_meta(ctx->ctx_out, ctx->ctx_conlist))
+    return notify_error(ctx, GDP_ERR_SEMANTICS, id,
+                        "an outward linkage has already been defined");
+  return ast->conlist_set_path(ctx->ctx_out, ctx->ctx_conlist);
 }
 
 static int set_inward_link(
@@ -831,9 +849,13 @@ static int parse_con_arrow_left(
   gdp_token id, op;
   int err;
 
-  // [ `left' | `right' | `scope' | `typeguid' ]
+  // [ `left' | `right' | `scope' | `typeguid' | `path' ]
   if ((err = lookahead(ctx, 1, &id))) return err;
   if (id.tkn_kind != TOK_ATOM) goto do_set_meta;
+  if (gdp_token_matches(&id, "path")) {
+    next(ctx, NULL);  // `path'
+    return set_path_link(ctx, &id);
+  }
   for (l = LINKAGEs; l->img; l++)
     if (gdp_token_matches(&id, l->img)) break;
   if (l->img == NULL) goto do_set_meta;
@@ -870,7 +892,7 @@ do_set_meta:
 }
 
 /**
- * ArrowConstraint <-- `<-' [ `left' | `right' | `scope' | `typeguid' ]
+ * ArrowConstraint <-- `<-' [ `left' | `right' | `scope' | `typeguid' | `path' ]
  *                 <-- `->'
  */
 static int parse_con_arrow(gdp_context *ctx) {
@@ -1004,6 +1026,78 @@ fail_STR:
   return notify_error(ctx, err, &tok, "expected a comparator");
 fail_EQ:
   return notify_error(ctx, err, &tok, "expected '='");
+}
+
+/**
+ * StepConstraint <-- `step' `=' `(' Constraints `)'
+ */
+static int parse_con_step(gdp_context *ctx) {
+  gdp_ast_ops const *ast = &ctx->ctx_out->out_ops;
+  gdp_conlist_t *step;
+  gdp_token tok;
+  int err;
+
+  // `step'
+  if ((err = next(ctx, &tok))) return err;
+  if (!is_read_request(ctx->ctx_cmd))
+    return notify_error(ctx, GDP_ERR_SEMANTICS, &tok,
+                        "paths are only allowed in read requests");
+  // `=' `('
+  if ((err = match(ctx, TOK_EQ, &tok)))
+    return notify_error(ctx, err, &tok, "expected '='");
+  if ((err = match(ctx, TOK_OPAR, &tok)))
+    return notify_error(ctx, err, &tok, "expected '(' after 'step='");
+  // Constraints `)'
+  if ((err = parse_constraints(ctx, &step))) return err;
+  if ((err = match(ctx, TOK_CPAR, &tok)))
+    return notify_error(ctx, err, &tok, /*(*/ "expected ')' at end of step");
+
+  return ast->conlist_add_step(ctx->ctx_out, ctx->ctx_conlist, step);
+}
+
+/**
+ * StepEndConstraint <-- `*'
+ */
+static int parse_con_step_end(gdp_context *ctx) {
+  gdp_ast_ops const *ast = &ctx->ctx_out->out_ops;
+  gdp_token tok;
+  int err;
+
+  // `*'
+  if ((err = next(ctx, &tok))) return err;
+  if (!is_read_request(ctx->ctx_cmd))
+    return notify_error(ctx, GDP_ERR_SEMANTICS, &tok,
+                        "paths are only allowed in read requests");
+  return ast->conlist_add_step_end(ctx->ctx_out, ctx->ctx_conlist);
+}
+
+/**
+ * StepsConstraint <-- `steps' ( `<' | `<=' | `=' | `>=' | `>' ) NUM
+ */
+static int parse_con_steps(gdp_context *ctx) {
+  gdp_ast_ops const *ast = &ctx->ctx_out->out_ops;
+  gdp_token tok;
+  graphd_operator op;
+  unsigned long long ull;
+  int err;
+
+  // `steps'
+  if ((err = next(ctx, &tok))) return err;
+  if (!is_read_request(ctx->ctx_cmd))
+    return notify_error(ctx, GDP_ERR_SEMANTICS, &tok,
+                        "paths are only allowed in read requests");
+  // `<' | `<=' | `=' | `>=' | `>'
+  if ((err = next(ctx, &tok))) return err;
+  if ((err = lookup_operator(&tok, &op)) || op == GRAPHD_OP_MATCH ||
+      op == GRAPHD_OP_NE)
+    return notify_error(ctx, err ? err : GDP_ERR_SYNTAX, &tok,
+                        "expected one of < <= = >= >");
+  // NUM
+  if ((err = next(ctx, &tok))) return err;
+  if ((err = gdp_token_toull(&tok, &ull)))
+    return notify_error(ctx, err, &tok, "expected a number of steps");
+
+  return ast->conlist_add_steps(ctx->ctx_out, ctx->ctx_conlist, op, ull);
 }
 
 /**
@@ -1930,6 +2024,9 @@ static int parse_con_sequence(gdp_context *ctx) {
  *            <-- NodeConstraint
  *            <-- PageConstraint
  *            <-- ResultConstraint
+ *            <-- StepConstraint
+ *            <-- StepEndConstraint
+ *            <-- StepsConstraint
  *            <-- StringConstraint
  *            <-- TimestampConstraint
  *            <-- TypeConstraint
@@ -1955,6 +2052,8 @@ static int parse_or_con(gdp_context *ctx,
       return parse_con_variable(ctx);
     case TOK_OBRC:
       return parse_con_sequence(ctx);
+    case TOK_STAR:
+      return parse_con_step_end(ctx);
     case TOK_OPAR:
       // ... Constraints `)'
       err = next(ctx, NULL);
@@ -2030,6 +2129,8 @@ static int parse_or_con(gdp_context *ctx,
       if (gdp_token_matches(tok1, "scope")) return parse_con_linkage(ctx);
       if (gdp_token_matches(tok1, "sort")) return parse_con_sort(ctx);
       if (gdp_token_matches(tok1, "start")) return parse_con_page(ctx);
+      if (gdp_token_matches(tok1, "step")) return parse_con_step(ctx);
+      if (gdp_token_matches(tok1, "steps")) return parse_con_steps(ctx);
       if (gdp_token_matches(tok1, "sort-comparator"))
         return parse_con_sortcomparator(ctx);
       break;
@@ -2173,6 +2274,7 @@ static int parse_constraints(gdp_context *ctx, gdp_conlist_t **new_conlist) {
       case TOK_VAR:
       case TOK_OBRC:
       case TOK_OPAR:
+      case TOK_STAR:
         if ((err = parse_con(ctx, &tok))) return err;
         break;
 

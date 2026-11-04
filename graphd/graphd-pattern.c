@@ -701,6 +701,10 @@ char const *graphd_pattern_type_to_string(graphd_pattern_type pat, char *buf,
       return "contents";
     case GRAPHD_PATTERN_NONE:
       return "none";
+    case GRAPHD_PATTERN_PATH:
+      return "path";
+    case GRAPHD_PATTERN_STEPS:
+      return "steps";
   }
 
   snprintf(buf, size, "unexpected pattern %x", pat);
