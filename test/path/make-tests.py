@@ -7,8 +7,9 @@ their expected replies. It keeps a model of the graph: every primitive
 it writes and the guid graphd will give it, which links are live, and
 which were versioned or deleted when. Expected replies come from a
 breadth-first search over the model that follows the proposal: matches
-in order of steps, then guid; each match's path through the lowest-guid
-predecessor at each step; the start never matches.
+in order of steps, then guid; each match's shortest paths in order of
+the guids of the nodes before it, back to the start, the first of them
+its "path"; the start never matches.
 
 Everything the model claims is checked against graphd as it is today,
 without path search:
@@ -31,6 +32,7 @@ path search is implemented.
 """
 
 import argparse
+import itertools
 import os
 import random
 import re
@@ -47,6 +49,9 @@ UNIT = os.path.join(TOP, 'test', 'unit')
 # How deep to check distances by nesting templates. Templates with an
 # "*" in two alternatives double in size with each level.
 MAX_UNROLL = {1: 16, 2: 6}
+
+# How many paths a list of paths holds without a pathlimit.
+DEFAULT_PATHLIMIT = 1000
 
 
 def guid(serial):
@@ -177,12 +182,13 @@ class Query(object):
   match: extra constraints on matches, as graphd text, and the same as
   a predicate on node names.  steps: [(op, n)].  result: a list of atoms
   for result=((...)), or 'count', or ('count', atoms) for
-  result=(count (...)).
+  result=(count (...)); among the atoms, a tuple is a list of paths,
+  ((... (path via))).  pathlimit: a number, 'all', or None.
   """
 
   def __init__(self, starts, step, match=('', None), steps=(), pagesize=None,
                optional=False, result=('name', 'path', 'via', 'steps'),
-               asof=None, note=None):
+               asof=None, pathlimit=None):
     self.starts = starts
     self.step = step
     self.match_text, self.match = match
@@ -191,7 +197,7 @@ class Query(object):
     self.optional = optional
     self.result = result
     self.asof = asof
-    self.note = note
+    self.pathlimit = pathlimit
 
   def text(self, m):
     parts = ['step=(%s)' % self.step.body]
@@ -200,14 +206,18 @@ class Query(object):
       parts.append(self.match_text)
     if self.pagesize is not None:
       parts.append('pagesize=%d' % self.pagesize)
+    if self.pathlimit is not None:
+      parts.append('pathlimit=%s' % self.pathlimit)
     if self.optional:
       parts.append('optional')
+    atoms = lambda xs: ' '.join(
+        '(%s)' % ' '.join(x) if isinstance(x, tuple) else x for x in xs)
     if self.result == 'count':
       parts.append('result=(count)')
     elif isinstance(self.result, tuple) and self.result[0] == 'count':
-      parts.append('result=(count (%s))' % ' '.join(self.result[1]))
+      parts.append('result=(count (%s))' % atoms(self.result[1]))
     else:
-      parts.append('result=((%s))' % ' '.join(self.result))
+      parts.append('result=((%s))' % atoms(self.result))
     starts = [m.g(s) for s in self.starts]
     start = ('guid=%s' % starts[0] if len(starts) == 1
              else 'guid=(%s)' % ' '.join(starts))
@@ -239,24 +249,47 @@ class Graphd(object):
     return replies
 
 
-def search(m, start, step, asof):
-  """Distances and predecessors from start, as the proposal defines."""
-  links = m.live(asof)
-  dist, pred = {start: 0}, {}
-  frontier, d = [start], 0
-  while frontier:
-    d += 1
-    found = {}
-    # Lowest guid first: each node's predecessor is the lowest-guid
-    # node of the previous level that reaches it.
-    for x in sorted(frontier, key=m.g):
-      for y in step.neighbors(m, links, x):
-        if y not in dist and y not in found:
-          found[y] = x
-    for y, x in found.items():
-      dist[y], pred[y] = d, x
-    frontier = list(found)
-  return dist, pred
+class Search(object):
+  """Distances and shortest paths from start, as the proposal defines."""
+
+  def __init__(self, m, start, step, asof):
+    self.m = m
+    self.start = start
+    links = m.live(asof)
+    self.dist = {start: 0}
+    self.preds = {}  # node -> its predecessors on shortest paths, by guid
+    frontier, d = [start], 0
+    while frontier:
+      d += 1
+      found = {}
+      for x in sorted(frontier, key=m.g):
+        for y in step.neighbors(m, links, x):
+          if y not in self.dist:
+            found.setdefault(y, []).append(x)
+      for y, xs in found.items():
+        self.dist[y], self.preds[y] = d, xs
+      frontier = list(found)
+    self._counts = {start: 1}
+
+  def paths(self, y):
+    """y's shortest paths, in order: by the node before y, then the one
+    before that, and so on back, lowest guid first."""
+    if y == self.start:
+      yield [y]
+      return
+    for x in self.preds[y]:
+      for p in self.paths(x):
+        yield p + [y]
+
+  def path(self, y):
+    """y's path: the first of its shortest paths."""
+    return next(self.paths(y))
+
+  def count(self, y):
+    """How many shortest paths y has."""
+    if y not in self._counts:
+      self._counts[y] = sum(self.count(x) for x in self.preds[y])
+    return self._counts[y]
 
 
 def in_bounds(d, steps):
@@ -279,7 +312,8 @@ class Expect(object):
     m, qy = self.m, self.query
     rows = []
     for start in sorted(qy.starts, key=m.g):
-      dist, pred = search(m, start, qy.step, qy.asof)
+      found = Search(m, start, qy.step, qy.asof)
+      dist = found.dist
       matches = sorted(
           (y for y, d in dist.items()
            if d > 0 and in_bounds(d, qy.steps) and
@@ -292,8 +326,7 @@ class Expect(object):
         matches = matches[:qy.pagesize]
       if not matches and not qy.optional:
         continue
-      rows.append('(%s %s)' % (q(start), self._sub(start, matches, dist,
-                                                    pred)))
+      rows.append('(%s %s)' % (q(start), self._sub(found, matches)))
     if not rows:
       return 'error EMPTY "not found"'
     return 'ok (%s)' % ' '.join(rows)
@@ -336,45 +369,56 @@ class Expect(object):
                         'via', 'a step from %s to %s' % (x, y)))
     return '{via:%d}' % (len(self.checks) - 1)
 
-  def _path(self, start, y, pred):
-    path = [y]
-    while path[-1] != start:
-      path.append(pred[path[-1]])
-    return path[::-1]
+  def _path_field(self, a, path):
+    """One of path, via and steps, for one path."""
+    if a == 'path':
+      return '(%s)' % ' '.join(self.m.g(n) for n in path)
+    if a == 'via':
+      return '(%s)' % ' '.join(self._via(x, y) for x, y in zip(path,
+                                                               path[1:]))
+    if a == 'steps':
+      return str(len(path) - 1)
+    raise ValueError(a)
 
-  def _fields(self, atoms, start, y, dist, pred):
+  def _fields(self, atoms, found, y):
     out = []
     for a in atoms:
-      if a == 'name':
+      if isinstance(a, tuple):
+        # A list of paths, up to the pathlimit.
+        limit = self.query.pathlimit
+        if limit is None:
+          limit = DEFAULT_PATHLIMIT
+        paths = list(itertools.islice(
+            found.paths(y), None if limit == 'all' else limit))
+        # Counting and listing paths are done separately; they agree.
+        assert len(paths) == min(found.count(y), len(paths)), y
+        if limit == 'all' or len(paths) < limit:
+          assert len(paths) == found.count(y), y
+        out.append('(%s)' % ' '.join(
+            '(%s)' % ' '.join(self._path_field(b, p) for b in a)
+            for p in paths))
+      elif a == 'name':
         out.append(q(y))
       elif a == 'guid':
         out.append(self.m.g(y))
       elif a == 'value':
         v = self.m.nodes[y]['value']
         out.append('null' if v is None else q(v))
-      elif a == 'steps':
-        out.append(str(dist[y]))
-      elif a == 'path':
-        out.append('(%s)' % ' '.join(
-            self.m.g(n) for n in self._path(start, y, pred)))
-      elif a == 'via':
-        p = self._path(start, y, pred)
-        out.append('(%s)' % ' '.join(
-            self._via(a_, b) for a_, b in zip(p, p[1:])))
+      elif a == 'path-count':
+        out.append(str(found.count(y)))
       else:
-        raise ValueError(a)
+        out.append(self._path_field(a, found.path(y)))
     return '(%s)' % ' '.join(out)
 
-  def _sub(self, start, matches, dist, pred):
+  def _sub(self, found, matches):
     r = self.query.result
     if r == 'count':
       return '(%d)' % len(matches)
     if isinstance(r, tuple) and r[0] == 'count':
       return '(%s)' % ' '.join(
           [str(len(matches))] +
-          [self._fields(r[1], start, y, dist, pred) for y in matches])
-    return '(%s)' % ' '.join(self._fields(r, start, y, dist, pred)
-                             for y in matches)
+          [self._fields(r[1], found, y) for y in matches])
+    return '(%s)' % ' '.join(self._fields(r, found, y) for y in matches)
 
 
 def is_list(text):
@@ -489,6 +533,11 @@ def tree_tests():
       Query(['n3', 'n30'], down, steps=[('=', 1)], result=('name',)),
       Query(['n3', 'n30'], down, steps=[('=', 1)], optional=True,
             result=('name',)),
+      # A tree has one path to each node.
+      Query(['n0'], down, name('n27'),
+            result=('name', 'path-count', ('path', 'steps'))),
+      Query(['n15'], either, steps=[('=', 2)], pathlimit='all',
+            result=('name', 'path-count', ('path',))),
   ]
   return generate('path-tree', tree_tests.__doc__, m, qs, Graphd(ARGS.graphd))
 
@@ -524,7 +573,7 @@ def coauthor_tests():
             'right->(*))))' % (t, t), through('author'))
   name = lambda n: ('name=%s' % q(n), lambda m, y: y == n)
   # Pairs at each distance the graph has, nearest and farthest first.
-  dist0, _ = search(m, 'a0', co, None)
+  dist0 = Search(m, 'a0', co, None).dist
   far = max(dist0.values())
   farthest = sorted((y for y in dist0 if dist0[y] == far), key=m.g)
   qs = [Query(['a0'], co, name(farthest[0]))]
@@ -542,6 +591,13 @@ def coauthor_tests():
             result=('name', 'path', 'via', 'steps')),
       Query(['a4', 'a9', 'a36'], co, name('a21'), optional=True),
       Query(['a4', 'a9', 'a36'], co, name('a21')),
+      # Several shortest paths.
+      Query(['a0'], co, name(farthest[0]),
+            result=('name', 'path-count', ('path', 'via'))),
+      Query(['a0'], co, name(farthest[0]), pathlimit=2,
+            result=('name', 'path-count', ('path', 'via', 'steps'))),
+      Query(['a0'], co, steps=[('=', 3)], pagesize=4, pathlimit='all',
+            result=('count', ('name', 'path-count', ('path',)))),
   ]
   return generate('path-coauthor', coauthor_tests.__doc__, m, qs,
                   Graphd(ARGS.graphd))
@@ -602,6 +658,18 @@ def grid_tests():
       Query(['g0-0'], both, result='count'),
       Query(['g4-4'], both, steps=[('=', 3)], result='count'),
       Query(['g4-4'], both, pagesize=6, result=('name', 'steps')),
+      # Many equally short paths: C(r + c, r) from one corner.
+      Query(['g0-0'], forward, name('g2-2'), pathlimit='all',
+            result=('name', 'path-count', ('path',))),
+      Query(['g0-0'], forward, name('g2-2'), pathlimit=3,
+            result=('name', 'path-count', ('path', 'via'))),
+      Query(['g0-0'], forward, name('g7-7'), result=('path-count',)),
+      Query(['g0-0'], forward, name('g7-7'), pathlimit=2,
+            result=('steps', 'path-count', ('path',))),
+      Query(['g0-0'], forward, steps=[('=', 3)],
+            result=('name', 'path-count', 'path', ('path',))),
+      Query(['g4-4'], both, steps=[('=', 2)], pagesize=3,
+            result=('name', 'path-count', ('path', 'via', 'steps'))),
   ]
   return generate('path-grid', grid_tests.__doc__, m, qs, Graphd(ARGS.graphd))
 
@@ -687,6 +755,13 @@ def semantics_tests():
       Query(['a', 's', 'h3'], fwd, steps=[('=', 1)], result=('name',)),
       Query(['a', 's', 'h3'], fwd, steps=[('=', 1)], optional=True,
             result=('name',)),
+      # Both of s's paths to t, z's first; path is the first of them.
+      Query(['s'], fwd, name('t'),
+            result=('name', 'path', 'path-count', ('path', 'via'))),
+      Query(['s'], fwd, name('t'), pathlimit=1,
+            result=('name', 'path-count', ('path', 'via'))),
+      Query(['s'], fwd, name('t'), pathlimit='all',
+            result=('name', 'path-count', ('steps', 'path'))),
   ]
   return generate('path-semantics', semantics_tests.__doc__, m, qs,
                   Graphd(ARGS.graphd))

@@ -707,6 +707,8 @@ char const *graphd_pattern_type_to_string(graphd_pattern_type pat, char *buf,
       return "steps";
     case GRAPHD_PATTERN_VIA:
       return "via";
+    case GRAPHD_PATTERN_PATH_COUNT:
+      return "path-count";
   }
 
   snprintf(buf, size, "unexpected pattern %x", pat);

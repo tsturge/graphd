@@ -681,7 +681,10 @@ typedef enum graphd_pattern_type {
   GRAPHD_PATTERN_STEPS = 31,
 
   /** @brief A path's steps: for each, the step template's results. */
-  GRAPHD_PATTERN_VIA = 32
+  GRAPHD_PATTERN_VIA = 32,
+
+  /** @brief The number of shortest paths to a path search's match. */
+  GRAPHD_PATTERN_PATH_COUNT = 33
 
 } graphd_pattern_type;
 
@@ -1249,6 +1252,13 @@ struct graphd_constraint {
   graphd_constraint *con_step;
   graphd_count_constraint con_steps;
 
+  /*  How many of each match's shortest paths to return, each as a
+   *  result of its own ("pathlimit"); ULLONG_MAX for all of them.
+   *  Without pathlimit, one.
+   */
+  unsigned int con_pathlimit_valid : 1;
+  unsigned long long con_pathlimit;
+
   /* datatype/valuetype values */
   unsigned int con_valuetype : 8;
 
@@ -1470,7 +1480,8 @@ typedef enum graphd_constraint_clause_type {
   GRAPHD_CC_PATH,
   GRAPHD_CC_STEP,
   GRAPHD_CC_STEP_END,
-  GRAPHD_CC_STEPS
+  GRAPHD_CC_STEPS,
+  GRAPHD_CC_PATHLIMIT
 
 } graphd_constraint_clause_type;
 

@@ -49,6 +49,11 @@ A path is that step, repeated. The proposal adds:
    `steps` constraint counts them, just as the `count` atom and the
    `count` constraint agree); and `via`, one element per step: what the
    step template returns for that step (see Semantics).
+5. **Lists of paths**, for a match's other shortest paths: a third level
+   of list in the `<-path` constraint's result, `((name (path via)))`,
+   holds the match's shortest paths, each as the list says; with
+   **`pathlimit=N`** or **`pathlimit=all`** saying how many, and a
+   `path-count` atom for how many there are.
 
 Everything else is ordinary graphd: the `<-path` constraint's other
 constraints (`guid=`, `type=`, `value=`, subconstraints, variables) say
@@ -63,8 +68,13 @@ ArrowConstraint   <-- `<-' [ `left' | `right' | `scope' | `typeguid' | `path' ]
 StepConstraint    <-- `step' `=' `(' Constraints `)'
 StepEndConstraint <-- `*'
 StepsConstraint   <-- `steps' ( `<' | `<=' | `=' | `>=' | `>' ) NUM
-Pattern atoms     +=  `path' | `steps' | `via'
+PathLimitConstraint <-- `pathlimit' `=' ( NUM | `all' )
+Pattern atoms     +=  `path' | `steps' | `via' | `path-count'
 ```
+
+In a `<-path` constraint's result, a list may hold a third level of
+list, a list of paths (see below); everywhere else, results nest lists
+two levels deep at most, as before.
 
 `*` is a new token. All of this is allowed only in read requests.
 
@@ -124,6 +134,48 @@ guid.
 How many people are within three steps: `$n=count`, or `result=(count)`,
 on the `<-path` constraint, as anywhere else.
 
+Every shortest path from A to B, and how many there are:
+
+```
+read (guid=A result=((name contents))
+   (<-path step=(...) guid=B pathlimit=all
+      result=((path-count (path via)))))
+```
+```
+ok (("A" ((3 (((A X B) (VIA1 VIA2)) ((A Y B) (VIA3 VIA4)) ((A Z B) (...)))))))
+```
+
+## Several paths per match
+
+A match can have many shortest paths: in the 8 by 8 grid of the tests,
+3,432 from one corner to the other. By default a match has one, its
+first; for more, the `<-path` constraint's result holds a list of
+paths.
+
+- **A list of paths** is a third level of list in the result:
+  `result=((name (path via)))` returns, for each match, its name and a
+  list with an element for each of its shortest paths, here that path's
+  nodes and its `via`. It holds only `path`, `via` and `steps`, and a
+  result has at most one. Elsewhere in the result, `path`, `via` and
+  `steps` are the match's first path, as without a list.
+- **`pathlimit=N`** returns the first N of a match's shortest paths in
+  the list; **`pathlimit=all`**, all of them; without it, the first
+  1,000 (graphd's default page size). `pathlimit` needs a list of
+  paths to limit.
+- **`path-count`**, a result atom, is how many shortest paths a match
+  has, whatever the `pathlimit`.
+- **Order.** A match's shortest paths are in order of the guid of the
+  node before the match, then of the node before that, and so on back
+  to the start; the first is the one the Ties rule picks.
+- **Only shortest paths.** Longer paths (the shortest few, or all those
+  within some number of steps of the shortest) would be an extension:
+  another constraint, like `slack=N`, could admit them to the list.
+- **MQL.** MQL calls a limit `limit`; it would write the list of paths
+  as a list in the query, with its own `"limit"`, compiled to
+  `pathlimit`. `pathlimit` is graphd's name for it, as `countlimit` is
+  graphd's for counting: graphd's `pagesize` on the `<-path` constraint
+  already limits its matches, so the paths of each match need a name of
+  their own.
 ## Semantics
 
 - **Matches.** A node matches if it can be reached in one or more
@@ -181,14 +233,19 @@ on the `<-path` constraint, as anywhere else.
   alone: what the next node must be is said by the next step, or by the
   `<-path` constraint itself.
 - A step cannot contain another `<-path`.
-- `step=`, `steps` and the `path`, `via` and `steps` results are only
-  for `<-path` constraints.
+- `step=`, `steps`, `pathlimit` and the `path`, `via`, `steps` and
+  `path-count` results are only for `<-path` constraints.
+- A list of paths holds only `path`, `via` and `steps`; a result has at
+  most one; `pathlimit` is a number of at least 1, or `all`, and needs a
+  list of paths in the result.
 
 ## Decisions taken (open to change)
 
 - **`step=` goes on the `<-path` constraint**, where its linkage is.
-- **One shortest path per match.** Returning all shortest paths (dblp
-  often has many) could be a later `result=` atom or a flag.
+- **One shortest path per match, unless the result asks for a list of
+  them.** A list of paths is a third level of result list, rather than
+  a result row per path, so each match stays one result with its paths
+  inside it, and paging and counting stay over matches.
 - **`path`, `via` and `steps` result atoms**, rather than per-step
   values collected through `$variables`; the step's own `result=`
   patterns already say what each step returns. (An earlier draft had
@@ -214,7 +271,9 @@ on the `<-path` constraint, as anywhere else.
 evaluation, on graphs too large to work out by hand: a binary tree
 (`path-tree`), random co-authorship (`path-coauthor`), an 8 by 8 grid
 (`path-grid`) and small graphs for the finer points above, including
-cycles, ties, closed nodes and link history (`path-semantics`).
+cycles, ties, closed nodes and link history (`path-semantics`); all four
+include lists of paths, and the grid's path counts are checked against
+their closed form.
 
 `test/path/make-tests.py` generates them from a model of each graph and
 a breadth-first search that follows this document, and checks the model
@@ -227,12 +286,15 @@ until evaluation is implemented.
 
 ## Implementation plan
 
-1. Parser (done): the lexer's `*` token; `<-path`, `step=`, `*` and
-   `steps` in libgdp; the new constraint clauses, fields
-   (`con_path`, `con_step`, `con_step_end`, `con_steps`) and pattern
-   types (`GRAPHD_PATTERN_PATH`, `GRAPHD_PATTERN_STEPS`,
-   `GRAPHD_PATTERN_VIA`) in graphd; the checks above;
+1. Parser (done): the lexer's `*` token; `<-path`, `step=`, `*`,
+   `steps` and `pathlimit` in libgdp; the new constraint clauses, fields
+   (`con_path`, `con_step`, `con_step_end`, `con_steps`,
+   `con_pathlimit`) and pattern types (`GRAPHD_PATTERN_PATH`,
+   `GRAPHD_PATTERN_STEPS`, `GRAPHD_PATTERN_VIA`,
+   `GRAPHD_PATTERN_PATH_COUNT`) in graphd; the checks above;
    `test/unit/path-parse.sh`. Tests for evaluation (done, pending).
+   Evaluation will also need graphd's two-level limit on result lists
+   (`parenthesize_pattern`) to allow a list of paths.
 2. Evaluation, one end: a read-set for `<-path` constraints that keeps a
    frontier and a visited set, evaluates the step template with its root
    bound to the frontier, and yields matches level by level, with each

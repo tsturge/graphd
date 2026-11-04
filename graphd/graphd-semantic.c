@@ -386,7 +386,7 @@ static void graphd_semantic_constraint_complete_subtree(
  */
 #define PATH_PATTERNS                                                \
   ((1ull << GRAPHD_PATTERN_PATH) | (1ull << GRAPHD_PATTERN_STEPS) | \
-   (1ull << GRAPHD_PATTERN_VIA))
+   (1ull << GRAPHD_PATTERN_VIA) | (1ull << GRAPHD_PATTERN_PATH_COUNT))
 
 /*  The pattern types in a constraint's result, sort and assignments.
  */
@@ -399,6 +399,35 @@ static unsigned long long constraint_spectrum(graphd_constraint const *con) {
   for (a = con->con_assignment_head; a != NULL; a = a->a_next)
     res |= graphd_pattern_spectrum(a->a_result);
   return res;
+}
+
+/*  In a <-path constraint's result, a third level of list is the
+ *  match's shortest paths, each as the list says: one of path, via and
+ *  steps.  Counts such lists in <pat> (at list depth <depth>) into
+ *  *n; returns a problem, or NULL.
+ */
+static char const *path_list_check(graphd_pattern const *pat, int depth,
+                                   size_t *n) {
+  graphd_pattern const *sub;
+  char const *problem;
+
+  if (pat == NULL) return NULL;
+  if (pat->pat_type == GRAPHD_PATTERN_LIST) depth++;
+  if (depth == 3) {
+    if (pat->pat_type != GRAPHD_PATTERN_LIST) return NULL;
+    (*n)++;
+    for (sub = pat->pat_list_head; sub != NULL; sub = sub->pat_next)
+      if (sub->pat_type != GRAPHD_PATTERN_PATH &&
+          sub->pat_type != GRAPHD_PATTERN_VIA &&
+          sub->pat_type != GRAPHD_PATTERN_STEPS)
+        return "a list of paths, ((... (path via steps))), can hold only "
+               "path, via and steps";
+    return NULL;
+  }
+  if (GRAPHD_PATTERN_IS_COMPOUND(pat->pat_type))
+    for (sub = pat->pat_list_head; sub != NULL; sub = sub->pat_next)
+      if ((problem = path_list_check(sub, depth, n)) != NULL) return problem;
+  return NULL;
 }
 
 /*  The number of "*" in a step template.
@@ -427,8 +456,20 @@ static bool path_check(graphd_request *greq, graphd_constraint const *con,
   graphd_constraint const *sub;
   graphd_constraint_or const *cor;
   char const *problem = NULL;
+  size_t path_lists = 0;
 
-  if (con->con_step_end && !in_step)
+  if (con->con_path)
+    problem = path_list_check(con->con_result, 0, &path_lists);
+
+  if (problem != NULL)
+    ;
+  else if (con->con_path && path_lists > 1)
+    problem = "a result can have only one list of paths";
+  else if (con->con_path && con->con_pathlimit_valid && path_lists == 0)
+    problem =
+        "pathlimit limits a list of paths in the result, "
+        "((... (path via steps))), and there is none";
+  else if (con->con_step_end && !in_step)
     problem = "\"*\" is only for where a step=(...) ends";
   else if (con->con_step_end && con->con_subcon_n > 0)
     problem = "\"*\" stands alone; constrain the node in the next step";
@@ -440,8 +481,12 @@ static bool path_check(graphd_request *greq, graphd_constraint const *con,
             con->con_steps.countcon_max_valid) &&
            !con->con_path)
     problem = "steps is only for <-path constraints";
+  else if (con->con_pathlimit_valid && !con->con_path)
+    problem = "pathlimit is only for <-path constraints";
   else if ((constraint_spectrum(con) & PATH_PATTERNS) && !con->con_path)
-    problem = "the path, via and steps results are only for <-path constraints";
+    problem =
+        "the path, via, steps and path-count results are only for <-path "
+        "constraints";
   else if (con->con_path) {
     *has_path = true;
     if (con->con_parent == NULL)

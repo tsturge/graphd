@@ -72,5 +72,8 @@ rungraphd -d${D} -bty <<-'EOF'
 	read (guid=00000012400034568000000000000001 result=((name contents)) (<-path step=(result=(contents) (<-left typeguid=00000012400034568000000000000000 result=((name)) right->(*))) steps=3 result=((name path via steps))))
 	read (guid=(00000012400034568000000000000001 00000012400034568000000000000009 0000001240003456800000000000001c) result=((name contents)) (<-path step=(result=(contents) (<-left typeguid=00000012400034568000000000000000 result=((name)) right->(*))) steps=1 result=((name))))
 	read (guid=(00000012400034568000000000000001 00000012400034568000000000000009 0000001240003456800000000000001c) result=((name contents)) (<-path step=(result=(contents) (<-left typeguid=00000012400034568000000000000000 result=((name)) right->(*))) steps=1 optional result=((name))))
+	read (guid=00000012400034568000000000000009 result=((name contents)) (<-path step=(result=(contents) (<-left typeguid=00000012400034568000000000000000 result=((name)) right->(*))) name="t" result=((name path path-count (path via)))))
+	read (guid=00000012400034568000000000000009 result=((name contents)) (<-path step=(result=(contents) (<-left typeguid=00000012400034568000000000000000 result=((name)) right->(*))) name="t" pathlimit=1 result=((name path-count (path via)))))
+	read (guid=00000012400034568000000000000009 result=((name contents)) (<-path step=(result=(contents) (<-left typeguid=00000012400034568000000000000000 result=((name)) right->(*))) name="t" pathlimit=all result=((name path-count (steps path)))))
 	EOF
 rm -rf $D

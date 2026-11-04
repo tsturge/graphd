@@ -99,5 +99,7 @@ rungraphd -d${D} -bty <<-'EOF'
 	read (guid=(00000012400034568000000000000004 00000012400034568000000000000005) result=((name contents)) (<-path step=(result=(contents) (<-left typeguid=00000012400034568000000000000000 result=((name)) right->(*))) steps=1 result=((name path))))
 	read (guid=(00000012400034568000000000000004 0000001240003456800000000000001f) result=((name contents)) (<-path step=(result=(contents) (<-left typeguid=00000012400034568000000000000000 result=((name)) right->(*))) steps=1 result=((name))))
 	read (guid=(00000012400034568000000000000004 0000001240003456800000000000001f) result=((name contents)) (<-path step=(result=(contents) (<-left typeguid=00000012400034568000000000000000 result=((name)) right->(*))) steps=1 optional result=((name))))
+	read (guid=00000012400034568000000000000001 result=((name contents)) (<-path step=(result=(contents) (<-left typeguid=00000012400034568000000000000000 result=((name)) right->(*))) name="n27" result=((name path-count (path steps)))))
+	read (guid=00000012400034568000000000000010 result=((name contents)) (<-path step=(result=(contents) {(<-left typeguid=00000012400034568000000000000000 result=((name)) right->(*))} | {(<-right typeguid=00000012400034568000000000000000 result=((name)) left->(*))}) steps=2 pathlimit=all result=((name path-count (path)))))
 	EOF
 rm -rf $D

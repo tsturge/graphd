@@ -516,6 +516,12 @@ char const *graphd_constraint_clause_to_string(
     case GRAPHD_CC_STEP_END:
       return "*";
 
+    case GRAPHD_CC_PATHLIMIT:
+      if (cc->cc_data.cd_limit == ULLONG_MAX)
+        return "{pathlimit=all}";
+      snprintf(buf, size, "{pathlimit=%llu}", cc->cc_data.cd_limit);
+      break;
+
     case GRAPHD_CC_STEPS:
       snprintf(buf, size, "{steps%s%llu}",
                operator_to_string(cc->cc_data.cd_count.count_op),
@@ -864,6 +870,16 @@ int graphd_constraint_clause_merge(graphd_request *greq, graphd_constraint *con,
 
     case GRAPHD_CC_STEPS:
       clause_merge_count(greq, con, &con->con_steps, cc);
+      break;
+
+    case GRAPHD_CC_PATHLIMIT:
+      if (con->con_pathlimit_valid) {
+        graphd_request_errprintf(greq, false,
+                                 "SEMANTICS more than one pathlimit=...");
+        return GRAPHD_ERR_SEMANTICS;
+      }
+      con->con_pathlimit = cc->cc_data.cd_limit;
+      con->con_pathlimit_valid = true;
       break;
 
     default:

@@ -624,6 +624,13 @@ struct gdp_ast_ops {
   int (*conlist_add_step_end)(gdp_output* out, gdp_conlist_t* where);
 
   /**
+   * Add a "pathlimit" constraint: how many of a match's shortest paths
+   * to return, each as a result of its own; ULLONG_MAX for "all".
+   */
+  int (*conlist_add_pathlimit)(gdp_output* out, gdp_conlist_t* where,
+                               unsigned long long limit);
+
+  /**
    * Add a "steps" constraint, bounding a path's number of steps.
    */
   int (*conlist_add_steps)(gdp_output* out, gdp_conlist_t* where,

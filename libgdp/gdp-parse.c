@@ -293,6 +293,8 @@ static graphd_pattern_type lookup_pattern(gdp_token const *tok) {
       break;
     case 'p':
       if (gdp_token_matches(tok, "path")) return GRAPHD_PATTERN_PATH;
+      if (gdp_token_matches(tok, "path-count"))
+        return GRAPHD_PATTERN_PATH_COUNT;
       if (gdp_token_matches(tok, "prev")) return GRAPHD_PATTERN_PREVIOUS;
       if (gdp_token_matches(tok, "previous")) return GRAPHD_PATTERN_PREVIOUS;
       break;
@@ -1070,6 +1072,34 @@ static int parse_con_step_end(gdp_context *ctx) {
     return notify_error(ctx, GDP_ERR_SEMANTICS, &tok,
                         "paths are only allowed in read requests");
   return ast->conlist_add_step_end(ctx->ctx_out, ctx->ctx_conlist);
+}
+
+/**
+ * PathLimitConstraint <-- `pathlimit' `=' ( NUM | `all' )
+ */
+static int parse_con_pathlimit(gdp_context *ctx) {
+  gdp_ast_ops const *ast = &ctx->ctx_out->out_ops;
+  gdp_token tok;
+  unsigned long long ull;
+  int err;
+
+  // `pathlimit'
+  if ((err = next(ctx, &tok))) return err;
+  if (!is_read_request(ctx->ctx_cmd))
+    return notify_error(ctx, GDP_ERR_SEMANTICS, &tok,
+                        "paths are only allowed in read requests");
+  // `='
+  if ((err = match(ctx, TOK_EQ, &tok)))
+    return notify_error(ctx, err, &tok, "expected '='");
+  // NUM | `all'
+  if ((err = next(ctx, &tok))) return err;
+  if (tok.tkn_kind == TOK_ATOM && gdp_token_matches(&tok, "all"))
+    ull = ULLONG_MAX;
+  else if ((err = gdp_token_toull(&tok, &ull)) || ull == 0)
+    return notify_error(ctx, err ? err : GDP_ERR_SEMANTICS, &tok,
+                        "expected a number of paths, at least 1, or 'all'");
+
+  return ast->conlist_add_pathlimit(ctx->ctx_out, ctx->ctx_conlist, ull);
 }
 
 /**
@@ -2024,6 +2054,7 @@ static int parse_con_sequence(gdp_context *ctx) {
  *            <-- LinkageConstraint
  *            <-- NodeConstraint
  *            <-- PageConstraint
+ *            <-- PathLimitConstraint
  *            <-- ResultConstraint
  *            <-- StepConstraint
  *            <-- StepEndConstraint
@@ -2118,6 +2149,8 @@ static int parse_or_con(gdp_context *ctx,
       break;
     case 'p':
       if (gdp_token_matches(tok1, "pagesize")) return parse_con_page(ctx);
+      if (gdp_token_matches(tok1, "pathlimit"))
+        return parse_con_pathlimit(ctx);
       if (gdp_token_matches(tok1, "prev")) return parse_con_guid(ctx);
       if (gdp_token_matches(tok1, "previous")) return parse_con_guid(ctx);
       break;

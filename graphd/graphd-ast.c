@@ -1354,6 +1354,19 @@ static int ast_conlist_add_step_end(gdp_output *out, gdp_conlist_t *where) {
   return 0;
 }
 
+static int ast_conlist_add_pathlimit(gdp_output *out, gdp_conlist_t *where,
+                                     unsigned long long limit) {
+  graphd_request *greq = out->out_private;
+  graphd_constraint_clause *cc;
+
+  cc = graphd_constraint_clause_alloc(greq, GRAPHD_CC_PATHLIMIT);
+  if (cc == NULL) return ENOMEM;
+
+  cc->cc_data.cd_limit = limit;
+  graphd_constraint_clause_append(where, cc);
+  return 0;
+}
+
 static int ast_conlist_add_steps(gdp_output *out, gdp_conlist_t *where,
                                  graphd_operator op, unsigned long long val) {
   graphd_request *greq = out->out_private;
@@ -1715,6 +1728,7 @@ static void _init_ast_ops(gdp_ast_ops *ops) {
       .conlist_add_step = ast_conlist_add_step,
       .conlist_add_step_end = ast_conlist_add_step_end,
       .conlist_add_steps = ast_conlist_add_steps,
+      .conlist_add_pathlimit = ast_conlist_add_pathlimit,
       .conlist_has_linkage = ast_conlist_has_linkage,
       .conlist_add_valuecomparator = ast_conlist_add_value_comparator,
       .conlist_new_sortcomparator = ast_conlist_new_sortcomparator,
