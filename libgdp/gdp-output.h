@@ -612,10 +612,11 @@ struct gdp_ast_ops {
   /**
    * Add a "step=(...)" constraint: the template for one step of a
    * path.  Its root is the node a step starts from; @a step contains
-   * exactly one "*", where the step ends.
+   * a "*", where the step ends.  @a walk is a second copy of the same
+   * template, parsed from the same tokens, or NULL.
    */
   int (*conlist_add_step)(gdp_output* out, gdp_conlist_t* where,
-                          gdp_conlist_t* step);
+                          gdp_conlist_t* step, gdp_conlist_t* walk);
 
   /**
    * Add a "*" constraint: in a step template, the node where the step

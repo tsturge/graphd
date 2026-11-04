@@ -1324,21 +1324,27 @@ static int ast_conlist_set_path(gdp_output *out, gdp_conlist_t *list) {
 }
 
 static int ast_conlist_add_step(gdp_output *out, gdp_conlist_t *where,
-                                gdp_conlist_t *list) {
+                                gdp_conlist_t *list, gdp_conlist_t *walk_list) {
   graphd_request *greq = out->out_private;
-  graphd_constraint *step = list;
+  graphd_constraint *step = list, *walk = walk_list;
   graphd_constraint_clause *cc;
   int err;
 
   step->con_parent = where;
-
   err = validate_conlist(out, step);
   if (err != 0) return err;
+
+  if (walk != NULL) {
+    walk->con_parent = where;
+    err = validate_conlist(out, walk);
+    if (err != 0) return err;
+  }
 
   cc = graphd_constraint_clause_alloc(greq, GRAPHD_CC_STEP);
   if (cc == NULL) return ENOMEM;
 
-  cc->cc_data.cd_subcon = step;
+  cc->cc_data.cd_step.step = step;
+  cc->cc_data.cd_step.walk = walk;
   graphd_constraint_clause_append(where, cc);
   return 0;
 }

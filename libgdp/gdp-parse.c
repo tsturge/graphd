@@ -49,6 +49,18 @@ struct gdp_context {
    * constraint list. Each bit correspond to a linkage kind (typeguid,
    * right, left, scope). There are @c PDB_LINKAGE_N linkage kinds. */
   unsigned int ctx_linkmap;
+
+  /** While parsing a step=(...), the tokens consumed, to parse them a
+   * second time (see parse_con_step()). */
+  bool ctx_recording;
+  gdp_token *ctx_rec;
+  size_t ctx_rec_n;
+  size_t ctx_rec_m;
+
+  /** If non-NULL, tokens come from here rather than the input. */
+  gdp_token const *ctx_replay;
+  size_t ctx_replay_n;
+  size_t ctx_replay_i;
 };
 
 typedef struct gdp_context gdp_context;
@@ -130,6 +142,37 @@ static inline bool is_read_request(graphd_command cmd) {
   return (cmd == GRAPHD_REQUEST_READ) || (cmd == GRAPHD_REQUEST_ITERATE);
 }
 
+/**
+ * The next token from the input, or from the tokens being replayed.
+ */
+static int consume(gdp_context *ctx, gdp_token *tok) {
+  if (ctx->ctx_replay == NULL)
+    return gdp_lexer_consume(ctx->ctx_parser, ctx->ctx_in, tok);
+  if (ctx->ctx_replay_i < ctx->ctx_replay_n)
+    *tok = ctx->ctx_replay[ctx->ctx_replay_i++];
+  else {
+    memset(tok, 0, sizeof(*tok));
+    tok->tkn_kind = TOK_END;
+  }
+  return 0;
+}
+
+/**
+ * Remember a consumed token, while recording.
+ */
+static int record(gdp_context *ctx, gdp_token const *tok) {
+  if (ctx->ctx_rec_n >= ctx->ctx_rec_m) {
+    size_t m = ctx->ctx_rec_m ? 2 * ctx->ctx_rec_m : 64;
+    gdp_token *rec =
+        cm_realloc(ctx->ctx_parser->cm, ctx->ctx_rec, m * sizeof(*rec));
+    if (rec == NULL) return ENOMEM;
+    ctx->ctx_rec = rec;
+    ctx->ctx_rec_m = m;
+  }
+  ctx->ctx_rec[ctx->ctx_rec_n++] = *tok;
+  return 0;
+}
+
 static int lookahead(gdp_context *ctx, unsigned int count, gdp_token *tok) {
   gdp_lookahead *lah = &ctx->ctx_lah;
   int err;
@@ -147,7 +190,7 @@ static int lookahead(gdp_context *ctx, unsigned int count, gdp_token *tok) {
     /* where to insert the lookahead token */
     gdp_token *cur = &lah->lah_buf[lah->lah_tail];
     /* consume token from input */
-    if ((err = gdp_lexer_consume(ctx->ctx_parser, ctx->ctx_in, cur)))
+    if ((err = consume(ctx, cur)))
       return notify_error(ctx, err, cur, "invalid token");
     /* advance tail cursor in the circular buffer */
     lah->lah_tail = (lah->lah_tail + 1) % GDP_MAX_LOOKAHEAD;
@@ -164,23 +207,25 @@ static int next(gdp_context *ctx, gdp_token *tok) {
   gdp_token dummy;
   int err;
 
+  if
+    unlikely(tok == NULL) tok = &dummy;
+
   /* anything in the lookahead buffer? */
   if (ctx->ctx_lah.lah_n > 0) {
     gdp_lookahead *const lah = &ctx->ctx_lah;
     /* retrieve token from lookahead buffer */
-    if (tok != NULL) *tok = lah->lah_buf[lah->lah_head];
+    *tok = lah->lah_buf[lah->lah_head];
     /* pop element from buffer */
     lah->lah_head = (lah->lah_head + 1) % GDP_MAX_LOOKAHEAD;
     lah->lah_n--;
   }
   /* ...no, then consume token from the input stream */
   else {
-    if
-      unlikely(tok == NULL) tok = &dummy;
-    if ((err = gdp_lexer_consume(ctx->ctx_parser, ctx->ctx_in, tok)))
+    if ((err = consume(ctx, tok)))
       return notify_error(ctx, err, tok, "invalid token");
   }
 
+  if (ctx->ctx_recording && (err = record(ctx, tok)) != 0) return err;
   return 0;
 }
 
@@ -1036,8 +1081,10 @@ fail_EQ:
  */
 static int parse_con_step(gdp_context *ctx) {
   gdp_ast_ops const *ast = &ctx->ctx_out->out_ops;
-  gdp_conlist_t *step;
+  gdp_conlist_t *step, *walk = NULL;
+  gdp_lookahead lah;
   gdp_token tok;
+  bool again;
   int err;
 
   // `step'
@@ -1050,12 +1097,46 @@ static int parse_con_step(gdp_context *ctx) {
     return notify_error(ctx, err, &tok, "expected '='");
   if ((err = match(ctx, TOK_OPAR, &tok)))
     return notify_error(ctx, err, &tok, "expected '(' after 'step='");
-  // Constraints `)'
-  if ((err = parse_constraints(ctx, &step))) return err;
+  /*  Constraints `)'
+   *
+   *  graphd evaluates a step two ways: with its own result patterns,
+   *  and, to walk a path, with others.  So that it can have a copy of
+   *  the step for each, record the step's tokens as they are parsed,
+   *  and parse them again.  (A step inside a step is an error, found
+   *  later; it gets one copy.)
+   */
+  again = !ctx->ctx_recording && ctx->ctx_replay == NULL;
+  if (again) {
+    ctx->ctx_recording = true;
+    ctx->ctx_rec_n = 0;
+  }
+  err = parse_constraints(ctx, &step);
+  if (again) ctx->ctx_recording = false;
+  if (err != 0) return err;
   if ((err = match(ctx, TOK_CPAR, &tok)))
     return notify_error(ctx, err, &tok, /*(*/ "expected ')' at end of step");
 
-  return ast->conlist_add_step(ctx->ctx_out, ctx->ctx_conlist, step);
+  if (again) {
+    if ((err = record(ctx, &tok)) != 0) return err;
+
+    /*  Set aside the lookahead from the input, and parse the step
+     *  again from the recording.
+     */
+    lah = ctx->ctx_lah;
+    memset(&ctx->ctx_lah, 0, sizeof(ctx->ctx_lah));
+    ctx->ctx_replay = ctx->ctx_rec;
+    ctx->ctx_replay_n = ctx->ctx_rec_n;
+    ctx->ctx_replay_i = 0;
+
+    err = parse_constraints(ctx, &walk);
+    if (err == 0 && (err = match(ctx, TOK_CPAR, &tok)) != 0)
+      err = notify_error(ctx, err, &tok, /*(*/ "expected ')' at end of step");
+
+    ctx->ctx_replay = NULL;
+    ctx->ctx_lah = lah;
+    if (err != 0) return err;
+  }
+  return ast->conlist_add_step(ctx->ctx_out, ctx->ctx_conlist, step, walk);
 }
 
 /**
@@ -3663,9 +3744,9 @@ int gdp_parse(gdp *parser, gdp_input *input, gdp_output *output) {
   };
 
   /* parse request */
-  if ((err = parse_request(&ctx))) {
-    return err;
-  }
+  err = parse_request(&ctx);
+  if (ctx.ctx_rec != NULL) cm_free(parser->cm, ctx.ctx_rec);
+  if (err) return err;
 
   /* done */
   if (parser->dbglex) fputc('\n', parser->dbgf);

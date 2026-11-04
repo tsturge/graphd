@@ -510,7 +510,7 @@ char const *graphd_constraint_clause_to_string(
 
     case GRAPHD_CC_STEP:
       snprintf(buf, size, "{step=%s}",
-               graphd_constraint_to_string(cc->cc_data.cd_subcon));
+               graphd_constraint_to_string(cc->cc_data.cd_step.step));
       break;
 
     case GRAPHD_CC_STEP_END:
@@ -860,8 +860,10 @@ int graphd_constraint_clause_merge(graphd_request *greq, graphd_constraint *con,
                                  "SEMANTICS more than one step=...");
         return GRAPHD_ERR_SEMANTICS;
       }
-      con->con_step = cc->cc_data.cd_subcon;
+      con->con_step = cc->cc_data.cd_step.step;
       con->con_step->con_parent = con;
+      con->con_step_walk = cc->cc_data.cd_step.walk;
+      if (con->con_step_walk != NULL) con->con_step_walk->con_parent = con;
       break;
 
     case GRAPHD_CC_STEP_END:

@@ -1252,6 +1252,11 @@ struct graphd_constraint {
   graphd_constraint *con_step;
   graphd_count_constraint con_steps;
 
+  /*  A second copy of con_step, parsed from the same text, rewritten
+   *  to walk paths: see graphd-read-path.c.
+   */
+  graphd_constraint *con_step_walk;
+
   /*  How many of each match's shortest paths to return, each as a
    *  result of its own ("pathlimit"); ULLONG_MAX for all of them.
    *  Without pathlimit, one.
@@ -1538,6 +1543,11 @@ struct graphd_constraint_clause {
     unsigned long long cd_start;
     graphd_string_constraint *cd_strcon;
     graphd_constraint *cd_subcon;
+
+    struct {
+      graphd_constraint *step;
+      graphd_constraint *walk;
+    } cd_step;
 
     struct {
       graph_timestamp_t timestamp_value;
