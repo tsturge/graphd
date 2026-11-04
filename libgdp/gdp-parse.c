@@ -310,6 +310,7 @@ static graphd_pattern_type lookup_pattern(gdp_token const *tok) {
       if (gdp_token_matches(tok, "typeguid")) return GRAPHD_PATTERN_TYPEGUID;
       break;
     case 'v':
+      if (gdp_token_matches(tok, "via")) return GRAPHD_PATTERN_VIA;
       if (gdp_token_matches(tok, "value"))
         return GRAPHD_PATTERN_VALUE;
       else if (gdp_token_matches(tok, "valuetype"))

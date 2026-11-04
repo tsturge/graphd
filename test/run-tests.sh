@@ -75,8 +75,22 @@ for c in $sequential; do
   run_case "$c"
 done
 
+# test/unit/pending lists tests expected to fail until what they test
+# is implemented: they fail quietly, and passing is an error (take them
+# off the list).
+pending=$(sed -e 's/#.*//' test/unit/pending 2> /dev/null | tr -s ' \t\n' ' ')
+is_pending() { case " $pending " in *" $1 "*) return 0 ;; esac; return 1; }
+
 total=$(wc -l < status | tr -d ' ')
-failed=$(awk '$2 != 0 { print $1 }' status | sort)
+failed=
+waiting=
+passing=
+for c in $(awk '$2 != 0 { print $1 }' status | sort); do
+  if is_pending "$c"; then waiting="$waiting $c"; else failed="$failed $c"; fi
+done
+for c in $(awk '$2 == 0 { print $1 }' status | sort); do
+  if is_pending "$c"; then passing="$passing $c"; fi
+done
 
 if [ -n "$failed" ]; then
   for c in $failed; do
@@ -85,7 +99,15 @@ if [ -n "$failed" ]; then
   done
   echo
   echo "FAILED: $(echo $failed | wc -w | tr -d ' ') of $total:" $failed
+fi
+if [ -n "$passing" ]; then
+  echo "PASSING, but listed in test/unit/pending (remove them):" $passing
+fi
+if [ -n "$waiting" ]; then
+  echo "pending: $(echo $waiting | wc -w | tr -d ' ') (test/unit/pending):" $waiting
+fi
+if [ -n "$failed" ] || [ -n "$passing" ]; then
   echo "logs in $work/test/unit"
   exit 1
 fi
-echo "passed: $total of $total"
+echo "passed: $(($total - $(echo $waiting | wc -w))) of $total"

@@ -677,8 +677,11 @@ typedef enum graphd_pattern_type {
   /** @brief A path's nodes, from its parent to the match ("<-path"). */
   GRAPHD_PATTERN_PATH = 30,
 
-  /** @brief A path's steps: for each, the step template's result. */
-  GRAPHD_PATTERN_STEPS = 31
+  /** @brief The number of steps in a path. */
+  GRAPHD_PATTERN_STEPS = 31,
+
+  /** @brief A path's steps: for each, the step template's results. */
+  GRAPHD_PATTERN_VIA = 32
 
 } graphd_pattern_type;
 

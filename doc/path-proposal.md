@@ -44,9 +44,11 @@ A path is that step, repeated. The proposal adds:
    it, **`*`** marks the node where the step ends and the next starts.
 3. **`steps`** comparisons bounding the number of steps: `steps<=10`,
    `steps>=2`, `steps=3` (like `count` and `newest`).
-4. Two **result atoms**: `path`, the guids of the nodes along the path,
-   from the parent to the match; and `steps`, one element per step,
-   each what the step template's own `result=` patterns return.
+4. Three **result atoms**: `path`, the guids of the nodes along the
+   path, from the parent to the match; `steps`, their number (as the
+   `steps` constraint counts them, just as the `count` atom and the
+   `count` constraint agree); and `via`, one element per step: what the
+   step template returns for that step (see Semantics).
 
 Everything else is ordinary graphd: the `<-path` constraint's other
 constraints (`guid=`, `type=`, `value=`, subconstraints, variables) say
@@ -61,7 +63,7 @@ ArrowConstraint   <-- `<-' [ `left' | `right' | `scope' | `typeguid' | `path' ]
 StepConstraint    <-- `step' `=' `(' Constraints `)'
 StepEndConstraint <-- `*'
 StepsConstraint   <-- `steps' ( `<' | `<=' | `=' | `>=' | `>' ) NUM
-Pattern atoms     +=  `path' | `steps'
+Pattern atoms     +=  `path' | `steps' | `via'
 ```
 
 `*` is a new token. All of this is allowed only in read requests.
@@ -72,18 +74,28 @@ The shortest co-author path from Stonebraker to Knuth, with a paper for
 each step:
 
 ```
-read (guid=STONEBRAKER
+read (guid=STONEBRAKER result=((name contents))
    (<-path
-      step=((<-right typeguid=AUTHOR result=none
-                left->(result=guid
-                   (<-left typeguid=AUTHOR result=none right->(*)))))
+      step=(result=(contents)
+              (<-right typeguid=AUTHOR result=((contents))
+                 left->(result=((name))
+                    (<-left typeguid=AUTHOR result=none right->(*)))))
       steps<=10
       guid=KNUTH
-      result=((path steps))))
+      result=((path via steps))))
 ```
 ```
-ok ((((STONEBRAKER SUCIU PAPADIMITRIOU KNUTH) ((PAPER1) (PAPER2) (PAPER3))))))
+ok (("Michael Stonebraker"
+     (((STONEBRAKER SUCIU PAPADIMITRIOU KNUTH)
+       (((((("On XML and Databases"))) ((("The Seattle Report"))) ...)))
+        ...)
+       3))))
 ```
+
+The step's `result=` patterns follow graphd's usual rules: a
+constraint's results reach its parent only through `contents`, and
+`((...))` returns one entry per match, so this step returns every paper
+the two authors share.
 
 Direct links either way, except types, keys, names and permissions,
 which every object has; alternatives use graphd's `{ } | { }`:
@@ -114,10 +126,33 @@ on the `<-path` constraint, as anywhere else.
 
 ## Semantics
 
-- **Order.** Matches come in order of their number of steps, as a
-  breadth-first search finds them, and each match has one shortest path.
-  Paging (`pagesize`, `cursor`, `countlimit`) is over that order, so the
-  shortest path to one node is `guid=B pagesize=1`.
+- **Matches.** A node matches if it can be reached in one or more
+  steps and meets the `<-path` constraint's own constraints. Those
+  constraints pick matches; they don't restrict the nodes a path passes
+  through. The start never matches, even when a cycle leads back to it.
+- **Distance.** A match's `steps` is its shortest distance, and the
+  `steps` constraint bounds that: with `steps>=2`, a neighbor isn't a
+  match even if a longer walk also reaches it.
+- **Order.** Matches come in order of distance, then guid. Paging
+  (`pagesize`, `cursor`) is over that order, so the shortest path to one
+  node is `guid=B pagesize=1`. `count` counts what is returned, as it
+  does for any constraint with a `pagesize`.
+- **Ties.** Each match has one path: of its shortest paths, the one
+  whose node before the match has the lowest guid, and so on back to
+  the start. (A breadth-first search that takes each level's nodes in
+  guid order and keeps the first predecessor it finds does this.)
+- **via.** A step's element of `via` is the reply graphd gives to the
+  step template read with its root bound to the step's start and `*`
+  bound to its end: everything after `ok`, a list of the root's
+  results. So it shows every way the step can be taken between those
+  two nodes (every shared paper), and for a step with alternatives,
+  which alternative matched.
+- **Where steps start.** Constraints on the step template's root say
+  which nodes a step can start from, the start included. A node that
+  fails them can still be reached and matched, but not passed through.
+- **Several starts.** When the parent matches several nodes, each has
+  its own matches, as with any subconstraint; a start with no matches
+  drops out unless the `<-path` constraint is `optional`.
 - **Both ends.** When the `<-path` constraint has a single `guid=` and
   the step can be reversed (by flipping each linkage in the template:
   graphd can do this mechanically), graphd searches from both ends at
@@ -126,13 +161,15 @@ on the `<-path` constraint, as anywhere else.
   search; past it, the read fails with `TOOHARD`, as any other read
   would. `steps<=N` bounds the depth.
 - **Time.** `asof`, `live` and `newest` apply to the step as to any
-  constraint: "the shortest path as of 2015" needs nothing new.
+  constraint: only live links are steps, a versioned link is followed
+  to where its newest version points, and "the shortest path as of
+  2015" needs nothing new.
 - **Steps.** A step template is evaluated as a subconstraint is, with
   its root bound to the current frontier, a guid set: the cost of a
   level is the cost of today's join over that set.
-- **The parent.** The search starts from each node the parent matches;
-  `path` begins with that node. A step back to a node already reached is
-  ignored, so paths don't revisit nodes.
+- **Paths.** `path` begins with the start and ends with the match. A
+  step back to a node already reached is ignored, so paths don't
+  revisit nodes.
 
 ## Checks (implemented)
 
@@ -144,17 +181,19 @@ on the `<-path` constraint, as anywhere else.
   alone: what the next node must be is said by the next step, or by the
   `<-path` constraint itself.
 - A step cannot contain another `<-path`.
-- `step=`, `steps` and the `path` and `steps` results are only for
-  `<-path` constraints.
+- `step=`, `steps` and the `path`, `via` and `steps` results are only
+  for `<-path` constraints.
 
 ## Decisions taken (open to change)
 
 - **`step=` goes on the `<-path` constraint**, where its linkage is.
 - **One shortest path per match.** Returning all shortest paths (dblp
   often has many) could be a later `result=` atom or a flag.
-- **`path` and `steps` result atoms**, rather than per-step values
-  collected through `$variables`; the step's own `result=` patterns
-  already say what each step returns.
+- **`path`, `via` and `steps` result atoms**, rather than per-step
+  values collected through `$variables`; the step's own `result=`
+  patterns already say what each step returns. (An earlier draft had
+  `steps` return the per-step results; it is now the number, matching
+  the `steps` constraint, and the per-step results are `via`.)
 - **`*`** rather than a keyword: `next`, `start` and `end` already mean
   other things in graphd (the next version of a primitive, dump paging).
 
@@ -169,17 +208,35 @@ on the `<-path` constraint, as anywhere else.
   operators, and the extent of the repeated part is hard to see in a
   nested template.
 
+## Tests
+
+`test/unit/path-parse` covers the syntax and its errors. Four more test
+evaluation, on graphs too large to work out by hand: a binary tree
+(`path-tree`), random co-authorship (`path-coauthor`), an 8 by 8 grid
+(`path-grid`) and small graphs for the finer points above, including
+cycles, ties, closed nodes and link history (`path-semantics`).
+
+`test/path/make-tests.py` generates them from a model of each graph and
+a breadth-first search that follows this document, and checks the model
+against graphd as it is today: the guid of every write; every step of
+every expected path, read with its ends bound (that reply is also its
+`via`); and every distance, by nesting the step template that many
+times (it must reach the match) and one fewer (it must not). They are
+listed in `test/unit/pending`, which `make test` reports separately,
+until evaluation is implemented.
+
 ## Implementation plan
 
 1. Parser (done): the lexer's `*` token; `<-path`, `step=`, `*` and
    `steps` in libgdp; the new constraint clauses, fields
    (`con_path`, `con_step`, `con_step_end`, `con_steps`) and pattern
-   types (`GRAPHD_PATTERN_PATH`, `GRAPHD_PATTERN_STEPS`) in graphd; the
-   checks above; tests in `test/unit/path-parse.sh`.
+   types (`GRAPHD_PATTERN_PATH`, `GRAPHD_PATTERN_STEPS`,
+   `GRAPHD_PATTERN_VIA`) in graphd; the checks above;
+   `test/unit/path-parse.sh`. Tests for evaluation (done, pending).
 2. Evaluation, one end: a read-set for `<-path` constraints that keeps a
    frontier and a visited set, evaluates the step template with its root
    bound to the frontier, and yields matches level by level, with each
-   node's predecessor and step result for `path` and `steps`.
+   node's predecessor, for `path`, `via` and `steps`.
 3. Cost and paging: charge the search to the request's cost allowance;
    cursors that resume a search.
 4. Both ends: reverse a step template, and search from both ends when

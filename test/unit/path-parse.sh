@@ -22,6 +22,8 @@ rungraphd -d${D} -bty <<-'EOF'
 	read (any step=((<-left right->(*))))
 	read (any steps<=3)
 	read (any result=((path)))
+	read (any result=((via)))
+	read (guid=00000012400034568000000000000000 (<-path step=((<- (*))) result=((path via steps))))
 	read (any $s=steps result=(($s)))
 	read (any (<-left right->(*)))
 	read (any (<-path step=((<-left right->(* value="x")))))

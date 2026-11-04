@@ -384,8 +384,9 @@ static void graphd_semantic_constraint_complete_subtree(
 
 /*  Called after all constraints of an expression are fully parsed.
  */
-#define PATH_PATTERNS \
-  ((1ull << GRAPHD_PATTERN_PATH) | (1ull << GRAPHD_PATTERN_STEPS))
+#define PATH_PATTERNS                                                \
+  ((1ull << GRAPHD_PATTERN_PATH) | (1ull << GRAPHD_PATTERN_STEPS) | \
+   (1ull << GRAPHD_PATTERN_VIA))
 
 /*  The pattern types in a constraint's result, sort and assignments.
  */
@@ -440,7 +441,7 @@ static bool path_check(graphd_request *greq, graphd_constraint const *con,
            !con->con_path)
     problem = "steps is only for <-path constraints";
   else if ((constraint_spectrum(con) & PATH_PATTERNS) && !con->con_path)
-    problem = "the path and steps results are only for <-path constraints";
+    problem = "the path, via and steps results are only for <-path constraints";
   else if (con->con_path) {
     *has_path = true;
     if (con->con_parent == NULL)
