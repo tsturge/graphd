@@ -220,10 +220,25 @@ void graphd_read_path_check_memory(graphd_request *greq) {}
 #define GRAPHD_PATH_ORS_MAX 8
 
 /*  Frontier nodes a chain walk steps from before letting other work
- *  run, and the longest chain it follows.
+ *  run; the longest chain it follows; the most alternative chains a
+ *  step can have, and "or"s above one of them.
  */
 #define GRAPHD_PATH_FAST_BATCH 200
 #define GRAPHD_PATH_ROUTE_MAX 16
+#define GRAPHD_PATH_ROUTES_MAX 8
+#define GRAPHD_PATH_ROUTE_ALSO_MAX 4
+
+/*  One way through a step: rt_con, the constraints from the root to
+ *  "*", each the only subconstraint of the one before; rt_also, the
+ *  constraints above rt_con[0] - the root and "or" branches - that the
+ *  step's start must match as well.
+ */
+struct graphd_path_route {
+  graphd_constraint *rt_con[GRAPHD_PATH_ROUTE_MAX];
+  size_t rt_n;
+  graphd_constraint *rt_also[GRAPHD_PATH_ROUTE_ALSO_MAX];
+  size_t rt_also_n;
+};
 
 /*  Primitives a chain walk reads in one turn: graphd checks a request's
  *  cost allowance between turns, so they mustn't run long.
@@ -569,10 +584,10 @@ void graphd_read_path_constraint_free(graphd_request *greq,
   cm_handle *cm = greq->greq_req.req_cm;
 
   if (con->con_path_ors != NULL) cm_free(cm, con->con_path_ors);
-  if (con->con_path_route != NULL) cm_free(cm, con->con_path_route);
+  if (con->con_path_routes != NULL) cm_free(cm, con->con_path_routes);
   con->con_path_ors = NULL;
-  con->con_path_route = NULL;
-  con->con_path_ors_n = con->con_path_route_n = 0;
+  con->con_path_routes = NULL;
+  con->con_path_ors_n = con->con_path_routes_n = 0;
   con->con_path_route_known = false;
 }
 
@@ -899,44 +914,113 @@ static void walk_sort_preds(graphd_read_path_context *grp) {
 /* ---------------------------------------------------------------- */
 /*  Chain walks                                                      */
 
-/*  Is the walking template a chain?  If so, remember it.
+/*  Can a chain walk check <c>'s guid constraints on a node by itself?
  */
-static int route_find(graphd_request *greq, graphd_constraint *con) {
-  graphd_constraint *c = con->con_step_walk, *sub;
-  graphd_constraint *route[GRAPHD_PATH_ROUTE_MAX];
-  graphd_guid_constraint const *gc;
-  size_t n = 0;
+static bool route_node_ok(graphd_constraint const *c) {
+  graphd_guid_constraint const *gc = &c->con_guid;
 
-  con->con_path_route_known = true;
-  con->con_path_route_n = 0;
+  return !gc->guidcon_match_valid && !gc->guidcon_exclude_valid &&
+         (!gc->guidcon_include_valid || gc->guidcon_include.gs_n == 1);
+}
+
+/*  Add the ways through the step from <c>, which the step's start must
+ *  match together with also[0..also_n): one, if c is a chain to "*";
+ *  or, if c has one "or" whose branches hold all its subconstraints,
+ *  those of each branch.  False if they aren't all chains.
+ *
+ *  (A branch's subconstraints are the first con_subcon_n of the list
+ *  at its con_head, which runs on into the other branches'.)
+ */
+static bool route_collect(graphd_path_route *routes, size_t *routes_n,
+                          graphd_constraint **also, size_t also_n,
+                          graphd_constraint *c) {
+  graphd_constraint_or *cor = c->con_or_head;
+  graphd_path_route *rt;
+  graphd_constraint *sub;
+
+  if (!route_node_ok(c)) return false;
+  if (cor != NULL) {
+    if (cor->or_next != NULL || cor->or_short_circuit ||
+        cor->or_tail == NULL || also_n >= GRAPHD_PATH_ROUTE_ALSO_MAX ||
+        c->con_subcon_n !=
+            cor->or_head.con_subcon_n + cor->or_tail->con_subcon_n)
+      return false;
+    also[also_n] = c;
+    return route_collect(routes, routes_n, also, also_n + 1,
+                         &cor->or_head) &&
+           route_collect(routes, routes_n, also, also_n + 1, cor->or_tail);
+  }
+
+  if (*routes_n >= GRAPHD_PATH_ROUTES_MAX) return false;
+  rt = routes + *routes_n;
+  memcpy(rt->rt_also, also, also_n * sizeof(*also));
+  rt->rt_also_n = also_n;
+  rt->rt_n = 0;
   for (;;) {
-    if (n >= GRAPHD_PATH_ROUTE_MAX || c->con_or_head != NULL ||
-        c->con_or != NULL)
-      return 0;
-    gc = &c->con_guid;
-    if (gc->guidcon_match_valid || gc->guidcon_exclude_valid ||
-        (gc->guidcon_include_valid && gc->guidcon_include.gs_n != 1))
-      return 0;
-    route[n++] = c;
+    /*  (An "or" branch's con_or is its "or"; below, a constraint in
+     *  one is part of an alternative the chain walk can't follow.)
+     */
+    if (rt->rt_n >= GRAPHD_PATH_ROUTE_MAX || c->con_or_head != NULL ||
+        (rt->rt_n > 0 && c->con_or != NULL) || !route_node_ok(c))
+      return false;
+    rt->rt_con[rt->rt_n++] = c;
     if (c->con_step_end) break;
 
-    if (c->con_subcon_n != 1) return 0;
+    if (c->con_subcon_n != 1) return false;
     sub = c->con_head;
     if (!graphd_linkage_is_my(sub->con_linkage) &&
         !graphd_linkage_is_i_am(sub->con_linkage))
-      return 0;
+      return false;
     if (!GRAPHD_CONSTRAINT_IS_MANDATORY(sub) ||
         sub->con_count.countcon_max_valid ||
         (sub->con_count.countcon_min_valid &&
          sub->con_count.countcon_min > 1))
-      return 0;
+      return false;
     c = sub;
   }
-  con->con_path_route = cm_malloc(greq->greq_req.req_cm, n * sizeof(*route));
-  if (con->con_path_route == NULL) return ENOMEM;
-  memcpy(con->con_path_route, route, n * sizeof(*route));
-  con->con_path_route_n = n;
+  (*routes_n)++;
+  return true;
+}
+
+/*  Is each way through the walking template a chain?  If so, remember
+ *  them.
+ */
+static int route_find(graphd_request *greq, graphd_constraint *con) {
+  graphd_path_route routes[GRAPHD_PATH_ROUTES_MAX];
+  graphd_constraint *also[GRAPHD_PATH_ROUTE_ALSO_MAX];
+  size_t n = 0;
+
+  con->con_path_route_known = true;
+  con->con_path_routes_n = 0;
+  if (!route_collect(routes, &n, also, 0, con->con_step_walk)) return 0;
+
+  con->con_path_routes = cm_malloc(greq->greq_req.req_cm, n * sizeof(*routes));
+  if (con->con_path_routes == NULL) return ENOMEM;
+  memcpy(con->con_path_routes, routes, n * sizeof(*routes));
+  con->con_path_routes_n = n;
   return 0;
+}
+
+/*  Does <pr> match route <rt>'s constraint at depth <i>?
+ */
+static int route_match(graphd_request *greq, graphd_path_route const *rt,
+                       size_t i, pdb_primitive const *pr) {
+  size_t j;
+  int err;
+
+  if ((err = graphd_match_intrinsics(greq, rt->rt_con[i], pr)) != 0)
+    return err;
+  if (i == 0)
+    for (j = 0; j < rt->rt_also_n; j++)
+      if ((err = graphd_match_intrinsics(greq, rt->rt_also[j], pr)) != 0)
+        return err;
+  return 0;
+}
+
+/*  The memo's key for route <r> at depth <i>, going forward or back.
+ */
+static pdb_id memo_slot(size_t r, size_t i, bool back) {
+  return ((pdb_id)r * 2 + back) * GRAPHD_PATH_ROUTE_MAX + i;
 }
 
 typedef struct path_memo {
@@ -944,18 +1028,19 @@ typedef struct path_memo {
   size_t pm_n;
 } path_memo;
 
-static int fast_step(graphd_read_path_context *grp, size_t i, pdb_id id,
-                     pdb_primitive const *pr, pdb_id **ids, size_t *n,
-                     size_t *m);
+static int fast_step(graphd_read_path_context *grp, size_t r, size_t i,
+                     pdb_id id, pdb_primitive const *pr, pdb_id **ids,
+                     size_t *n, size_t *m);
 
-/*  Follow the chain from <id>, at <depth>, to the constraint below.
+/*  Follow route <r> from <id>, at depth <i>, to the constraint below.
  */
-static int fast_next(graphd_read_path_context *grp, size_t i, pdb_id id,
-                     pdb_primitive const *pr, pdb_id **ids, size_t *n,
-                     size_t *m) {
+static int fast_next(graphd_read_path_context *grp, size_t r, size_t i,
+                     pdb_id id, pdb_primitive const *pr, pdb_id **ids,
+                     size_t *n, size_t *m) {
   graphd_request *greq = grp->grp_base->grb_greq;
   pdb_handle *pdb = graphd_request_graphd(greq)->g_pdb;
-  graphd_constraint *next = grp->grp_con->con_path_route[i + 1];
+  graphd_path_route const *rt = grp->grp_con->con_path_routes + r;
+  graphd_constraint *next = rt->rt_con[i + 1];
   pdb_primitive cpr;
   pdb_iterator *it;
   graph_guid guid;
@@ -972,8 +1057,8 @@ static int fast_next(graphd_read_path_context *grp, size_t i, pdb_id id,
       return err == PDB_ERR_NO ? 0 : err;
     grp->grp_turn_reads++;
     if ((err = pdb_id_read(pdb, cid, &cpr)) != 0) return err;
-    err = graphd_match_intrinsics(greq, next, &cpr);
-    if (err == 0) err = fast_step(grp, i + 1, cid, &cpr, ids, n, m);
+    err = route_match(greq, rt, i + 1, &cpr);
+    if (err == 0) err = fast_step(grp, r, i + 1, cid, &cpr, ids, n, m);
     pdb_primitive_finish(pdb, &cpr);
     return err == GRAPHD_ERR_NO ? 0 : err;
   }
@@ -987,8 +1072,8 @@ static int fast_next(graphd_read_path_context *grp, size_t i, pdb_id id,
   while ((err = pdb_iterator_next_nonstep(pdb, it, &cid)) == 0) {
     grp->grp_turn_reads++;
     if ((err = pdb_id_read(pdb, cid, &cpr)) != 0) break;
-    err = graphd_match_intrinsics(greq, next, &cpr);
-    if (err == 0) err = fast_step(grp, i + 1, cid, &cpr, ids, n, m);
+    err = route_match(greq, rt, i + 1, &cpr);
+    if (err == 0) err = fast_step(grp, r, i + 1, cid, &cpr, ids, n, m);
     pdb_primitive_finish(pdb, &cpr);
     if (err != 0 && err != GRAPHD_ERR_NO) break;
   }
@@ -996,28 +1081,29 @@ static int fast_next(graphd_read_path_context *grp, size_t i, pdb_id id,
   return (err == PDB_ERR_NO || err == GRAPHD_ERR_NO) ? 0 : err;
 }
 
-/*  Append to *ids the nodes reached at "*" from <id>, which matches the
- *  chain's constraint at depth <i>.
+/*  Append to *ids the nodes reached at "*" from <id>, which matches
+ *  route <r>'s constraint at depth <i>.
  */
-static int fast_step(graphd_read_path_context *grp, size_t i, pdb_id id,
-                     pdb_primitive const *pr, pdb_id **ids, size_t *n,
-                     size_t *m) {
+static int fast_step(graphd_read_path_context *grp, size_t r, size_t i,
+                     pdb_id id, pdb_primitive const *pr, pdb_id **ids,
+                     size_t *n, size_t *m) {
   graphd_request *greq = grp->grp_base->grb_greq;
   cm_handle *cm = greq->greq_req.req_cm;
-  graphd_constraint *con = grp->grp_con;
-  pdb_id key[2] = {i, id}, *found = NULL;
+  graphd_path_route const *rt = grp->grp_con->con_path_routes + r;
+  pdb_id key[2] = {memo_slot(r, i, false), id}, *found = NULL;
   size_t found_n = 0, found_m = 0, j;
   path_memo *pm;
   int err;
 
-  if (i + 1 == con->con_path_route_n) return ids_append(cm, ids, n, m, id);
-  if (i == 0) return fast_next(grp, i, id, pr, ids, n, m);
+  if (i + 1 == rt->rt_n) return ids_append(cm, ids, n, m, id);
+  if (i == 0) return fast_next(grp, r, i, id, pr, ids, n, m);
 
   /*  Part way along the chain: what this node reaches doesn't depend on
    *  how the walk got here.
    */
   if ((pm = cm_haccess(&grp->grp_memo, path_memo, key, sizeof key)) == NULL) {
-    if ((err = fast_next(grp, i, id, pr, &found, &found_n, &found_m)) != 0) {
+    if ((err = fast_next(grp, r, i, id, pr, &found, &found_n, &found_m)) !=
+        0) {
       if (found != NULL) cm_free(cm, found);
       return err;
     }
@@ -1034,15 +1120,16 @@ static int fast_step(graphd_read_path_context *grp, size_t i, pdb_id id,
   return 0;
 }
 
-/*  Step from up to GRAPHD_PATH_FAST_BATCH nodes of the frontier.
+/*  Step from up to GRAPHD_PATH_FAST_BATCH nodes of the frontier, along
+ *  each route.
  */
 static int fast_walk(graphd_read_path_context *grp) {
   graphd_request *greq = grp->grp_base->grb_greq;
   pdb_handle *pdb = graphd_request_graphd(greq)->g_pdb;
   cm_handle *cm = greq->greq_req.req_cm;
-  graphd_constraint *root = grp->grp_con->con_path_route[0];
+  graphd_constraint *con = grp->grp_con;
   pdb_id *ids = NULL, x;
-  size_t n, m = 0, end, j;
+  size_t n, m = 0, end, j, r;
   pdb_primitive pr;
   int err = 0;
 
@@ -1061,10 +1148,12 @@ static int fast_walk(graphd_read_path_context *grp) {
     x = grp->grp_frontier[grp->grp_chunk];
     if ((err = pdb_id_read(pdb, x, &pr)) != 0) break;
     n = 0;
-    err = graphd_match_intrinsics(greq, root, &pr);
-    if (err == 0) err = fast_step(grp, 0, x, &pr, &ids, &n, &m);
+    for (r = 0; err == 0 && r < con->con_path_routes_n; r++) {
+      err = route_match(greq, con->con_path_routes + r, 0, &pr);
+      if (err == 0) err = fast_step(grp, r, 0, x, &pr, &ids, &n, &m);
+      if (err == GRAPHD_ERR_NO) err = 0;
+    }
     pdb_primitive_finish(pdb, &pr);
-    if (err == GRAPHD_ERR_NO) err = 0;
     for (j = 0; err == 0 && j < n; j++) {
       graph_guid guid;
       if ((err = pdb_id_to_guid(pdb, ids[j], &guid)) == 0)
@@ -1082,20 +1171,20 @@ static graphd_path_node *back_node(graphd_read_path_context *grp, pdb_id id) {
   return cm_haccess(&grp->grp_back, graphd_path_node, &id, sizeof id);
 }
 
-static int back_step(graphd_read_path_context *grp, size_t i, pdb_id id,
-                     pdb_primitive const *pr, pdb_id **ids, size_t *n,
-                     size_t *m);
+static int back_step(graphd_read_path_context *grp, size_t r, size_t i,
+                     pdb_id id, pdb_primitive const *pr, pdb_id **ids,
+                     size_t *n, size_t *m);
 
-/*  Follow the chain backwards from <id>, at depth <i>, to the
+/*  Follow route <r> backwards from <id>, at depth <i>, to the
  *  constraint above.
  */
-static int back_prev(graphd_read_path_context *grp, size_t i, pdb_id id,
-                     pdb_primitive const *pr, pdb_id **ids, size_t *n,
-                     size_t *m) {
+static int back_prev(graphd_read_path_context *grp, size_t r, size_t i,
+                     pdb_id id, pdb_primitive const *pr, pdb_id **ids,
+                     size_t *n, size_t *m) {
   graphd_request *greq = grp->grp_base->grb_greq;
   pdb_handle *pdb = graphd_request_graphd(greq)->g_pdb;
-  graphd_constraint *cur = grp->grp_con->con_path_route[i];
-  graphd_constraint *prev = grp->grp_con->con_path_route[i - 1];
+  graphd_path_route const *rt = grp->grp_con->con_path_routes + r;
+  graphd_constraint *cur = rt->rt_con[i];
   pdb_primitive ppr;
   pdb_iterator *it;
   graph_guid guid;
@@ -1112,8 +1201,8 @@ static int back_prev(graphd_read_path_context *grp, size_t i, pdb_id id,
       return err == PDB_ERR_NO ? 0 : err;
     grp->grp_turn_reads++;
     if ((err = pdb_id_read(pdb, pid, &ppr)) != 0) return err;
-    err = graphd_match_intrinsics(greq, prev, &ppr);
-    if (err == 0) err = back_step(grp, i - 1, pid, &ppr, ids, n, m);
+    err = route_match(greq, rt, i - 1, &ppr);
+    if (err == 0) err = back_step(grp, r, i - 1, pid, &ppr, ids, n, m);
     pdb_primitive_finish(pdb, &ppr);
     return err == GRAPHD_ERR_NO ? 0 : err;
   }
@@ -1127,8 +1216,8 @@ static int back_prev(graphd_read_path_context *grp, size_t i, pdb_id id,
   while ((err = pdb_iterator_next_nonstep(pdb, it, &pid)) == 0) {
     grp->grp_turn_reads++;
     if ((err = pdb_id_read(pdb, pid, &ppr)) != 0) break;
-    err = graphd_match_intrinsics(greq, prev, &ppr);
-    if (err == 0) err = back_step(grp, i - 1, pid, &ppr, ids, n, m);
+    err = route_match(greq, rt, i - 1, &ppr);
+    if (err == 0) err = back_step(grp, r, i - 1, pid, &ppr, ids, n, m);
     pdb_primitive_finish(pdb, &ppr);
     if (err != 0 && err != GRAPHD_ERR_NO) break;
   }
@@ -1136,24 +1225,25 @@ static int back_prev(graphd_read_path_context *grp, size_t i, pdb_id id,
   return (err == PDB_ERR_NO || err == GRAPHD_ERR_NO) ? 0 : err;
 }
 
-/*  Append to *ids the nodes a step from which reaches <id>, which
- *  matches the chain's constraint at depth <i>.
+/*  Append to *ids the nodes a step from which along route <r> reaches
+ *  <id>, which matches the route's constraint at depth <i>.
  */
-static int back_step(graphd_read_path_context *grp, size_t i, pdb_id id,
-                     pdb_primitive const *pr, pdb_id **ids, size_t *n,
-                     size_t *m) {
+static int back_step(graphd_read_path_context *grp, size_t r, size_t i,
+                     pdb_id id, pdb_primitive const *pr, pdb_id **ids,
+                     size_t *n, size_t *m) {
   cm_handle *cm = grp->grp_base->grb_greq->greq_req.req_cm;
-  pdb_id key[2] = {GRAPHD_PATH_ROUTE_MAX + i, id}, *found = NULL;
+  graphd_path_route const *rt = grp->grp_con->con_path_routes + r;
+  pdb_id key[2] = {memo_slot(r, i, true), id}, *found = NULL;
   size_t found_n = 0, found_m = 0, j;
   path_memo *pm;
   int err;
 
   if (i == 0) return ids_append(cm, ids, n, m, id);
-  if (i + 1 == grp->grp_con->con_path_route_n)
-    return back_prev(grp, i, id, pr, ids, n, m);
+  if (i + 1 == rt->rt_n) return back_prev(grp, r, i, id, pr, ids, n, m);
 
   if ((pm = cm_haccess(&grp->grp_memo, path_memo, key, sizeof key)) == NULL) {
-    if ((err = back_prev(grp, i, id, pr, &found, &found_n, &found_m)) != 0) {
+    if ((err = back_prev(grp, r, i, id, pr, &found, &found_n, &found_m)) !=
+        0) {
       if (found != NULL) cm_free(cm, found);
       return err;
     }
@@ -1193,15 +1283,15 @@ static int back_reach(graphd_read_path_context *grp, pdb_id v, pdb_id u) {
 }
 
 /*  Step back from up to GRAPHD_PATH_FAST_BATCH nodes of the back
- *  frontier.
+ *  frontier, along each route.
  */
 static int back_walk(graphd_read_path_context *grp) {
   graphd_request *greq = grp->grp_base->grb_greq;
   pdb_handle *pdb = graphd_request_graphd(greq)->g_pdb;
   cm_handle *cm = greq->greq_req.req_cm;
-  size_t k = grp->grp_con->con_path_route_n - 1;
+  graphd_constraint *con = grp->grp_con;
   pdb_id *ids = NULL, v;
-  size_t n, m = 0, end, j;
+  size_t n, m = 0, end, j, r;
   pdb_primitive pr;
   int err = 0;
 
@@ -1214,7 +1304,9 @@ static int back_walk(graphd_read_path_context *grp) {
     v = grp->grp_bfrontier[grp->grp_bchunk];
     if ((err = pdb_id_read(pdb, v, &pr)) != 0) break;
     n = 0;
-    err = back_step(grp, k, v, &pr, &ids, &n, &m);
+    for (r = 0; err == 0 && r < con->con_path_routes_n; r++)
+      err = back_step(grp, r, con->con_path_routes[r].rt_n - 1, v, &pr, &ids,
+                      &n, &m);
     pdb_primitive_finish(pdb, &pr);
     for (j = 0; err == 0 && j < n; j++) err = back_reach(grp, v, ids[j]);
   }
@@ -1713,7 +1805,7 @@ static int grp_walk(graphd_stack *stack, graphd_stack_context *sc) {
 
   /*  A chain, and only a few nodes can match: search from both ends.
    */
-  if (con->con_path_route_n > 0 && grp->grp_targets_n == 0 &&
+  if (con->con_path_routes_n > 0 && grp->grp_targets_n == 0 &&
       !grp->grp_no_match && !grp->grp_targets_tried &&
       (err = targets_from_iterator(grp)) != 0) {
     grp->grp_err = err;
@@ -1723,7 +1815,7 @@ static int grp_walk(graphd_stack *stack, graphd_stack_context *sc) {
     graphd_stack_resume(stack, sc, grp_match);
     return 0;
   }
-  if (con->con_path_route_n > 0 && grp->grp_targets_n > 0 &&
+  if (con->con_path_routes_n > 0 && grp->grp_targets_n > 0 &&
       grp->grp_targets_n <= GRAPHD_PATH_TARGETS_MAX && !grp->grp_two) {
     if ((err = two_start(grp)) != 0) {
       grp->grp_err = err;
@@ -1735,7 +1827,7 @@ static int grp_walk(graphd_stack *stack, graphd_stack_context *sc) {
 
   /*  A chain: follow it, a batch of the frontier at a time.
    */
-  if (con->con_path_route_n > 0) {
+  if (con->con_path_routes_n > 0) {
     if (grp->grp_chunk < grp->grp_frontier_n) {
       if ((err = fast_walk(grp)) != 0) grp->grp_err = err;
       return 0;

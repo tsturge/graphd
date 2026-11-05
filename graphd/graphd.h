@@ -93,6 +93,7 @@ typedef struct graphd_value graphd_value;
 typedef struct graphd_and_slow_check_state graphd_and_slow_check_state;
 typedef struct graphd_constraint graphd_constraint;
 typedef struct graphd_path_run graphd_path_run;
+typedef struct graphd_path_route graphd_path_route;
 typedef struct graphd_value_range graphd_value_range;
 typedef struct graphd_constraint_clause graphd_constraint_clause;
 typedef struct graphd_constraint_or graphd_constraint_or;
@@ -1292,16 +1293,18 @@ struct graphd_constraint {
   graphd_constraint_or **con_path_ors;
   size_t con_path_ors_n;
 
-  /*  If a <-path constraint's walking template is a chain - each
-   *  constraint, from the root to "*", with one subconstraint - the
-   *  chain, which the walk follows directly; con_path_route_n is 0 if
-   *  it isn't, or hasn't been looked at (con_path_route_known).
+  /*  If each way through a <-path constraint's walking template is a
+   *  chain - each constraint, from the root to "*", with one
+   *  subconstraint - the chains, which the walk follows directly: one,
+   *  or one per alternative of an "or" whose branches hold all the
+   *  step's subconstraints.  con_path_routes_n is 0 if the template
+   *  isn't like that, or hasn't been looked at (con_path_route_known).
    */
   unsigned int con_path_route_known : 1;
   unsigned int con_path_prepared : 1; /* graphd_read_path_semantic() ran */
   unsigned int con_sort_default_path : 1; /* sort=(steps guid) implied */
-  graphd_constraint **con_path_route;
-  size_t con_path_route_n;
+  graphd_path_route *con_path_routes;
+  size_t con_path_routes_n;
 
   /* datatype/valuetype values */
   unsigned int con_valuetype : 8;

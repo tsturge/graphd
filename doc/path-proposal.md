@@ -1,8 +1,8 @@
 # Path search in graphd: a proposal
 
-Status (branch `path-search`): implemented (`graphd/graphd-read-path.c`),
-searching from both ends when the step is a chain and only a few nodes
-can match, and otherwise from one end, stopping early when a page of
+Status: implemented (`graphd/graphd-read-path.c`), searching from both
+ends when the step is a chain, or an "or" of chains, and only a few
+nodes can match, and otherwise from one end, stopping early when a page of
 the nearest matches is all the results need. Resuming a search with a
 cursor, and MQL, are still to come.
 
@@ -207,13 +207,14 @@ paths.
 - **Several starts.** When the parent matches several nodes, each has
   its own matches, as with any subconstraint; a start with no matches
   drops out unless the `<-path` constraint is `optional`.
-- **Both ends.** When the step is a chain (below) and the `<-path`
+- **Both ends.** When the step is a chain, or an "or" of chains (below), and the `<-path`
   constraint can match only a few nodes - it names them with `guid=`,
   or graphd's own iterator for it holds at most 64, as with a name, an
   indexed value, or "the authors of this paper" - graphd searches from
   both ends at once, from the start and from each of those nodes in
-  turn: a chain is followed backwards by flipping each linkage. That
-  changes only the cost, not the answer.
+  turn: a chain is followed backwards by flipping each linkage, and an
+  "or" of chains by following each back. That changes only the cost,
+  not the answer.
 - **Stopping early.** Otherwise the search goes from one end. If the
   results are just a page of the nearest matches - an explicit
   `pagesize`, the default order, no cursor, and no subconstraints on
@@ -327,12 +328,24 @@ since evaluation was implemented.
   search walks level by level and records each new node's distance and
   predecessors. If the step is a chain (from the root to `*`, each
   constraint linked to its one subconstraint, mandatory, with no "or"s),
-  the walk follows it directly: through the linkage indexes, or a
+  or an "or" of chains, the walk follows it directly: through the linkage indexes, or a
   primitive's own pointers, checking each primitive against its
   constraint's intrinsics (which include `live`, versions and `asof`),
   and remembering what each node part way along the chain reaches. On
   dblp, the 53,252 people within two co-author steps of one author take
-  0.2 s this way, against 4.6 s through the read machinery. Other steps
+  0.2 s this way, against 4.6 s through the read machinery.
+  An "or" of chains is a step whose root has one `|` "or" (not `||`),
+  nested for three or more alternatives, whose branches hold all of the
+  root's subconstraints, each branch a chain; a branch's own
+  constraints, and the root's, apply to the node the step starts from.
+  The walk follows every branch from each node and takes the union, as
+  the template does: `{(<-left typeguid=T right->(*))} |
+  {(<-right typeguid=T left->(*))}`, either way along a link, is two
+  one-link chains. On dblp, either way along author links between
+  Stonebraker and Knuth takes 0.07 s warm, 2.8 s cold; before, the
+  general walk had not finished after four and a half minutes.
+  `test/unit/path-cost` checks that such steps take the chain walk.
+  Other steps
   are walked by evaluating the walking template with its root bound to
   up to 1,000 frontier nodes at a time (a fixed iterator). It then
   evaluates the `<-path` constraint as an ordinary read-set over the
@@ -397,7 +410,7 @@ since evaluation was implemented.
    from one end, the search reaches most of the graph.
 3. Cost and paging: charge the search to the request's cost allowance;
    cursors that resume a search.
-4. Both ends (done, for chain-shaped steps): between the same dblp
+4. Both ends (done, for chains and "or"s of chains): between the same dblp
    authors, 0.6 s with a cold cache, 0.1-0.2 s warm (Stonebraker to
    Knuth: 133 s from one end; 158 thousand primitives read instead of
    74 million). To all eight authors of one paper, from authors two to

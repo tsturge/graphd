@@ -47,8 +47,8 @@ TOP = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 UNIT = os.path.join(TOP, 'test', 'unit')
 
 # How deep to check distances by nesting templates. Templates with an
-# "*" in two alternatives double in size with each level.
-MAX_UNROLL = {1: 16, 2: 6}
+# "*" in two or three alternatives double or triple in size with each level.
+MAX_UNROLL = {1: 16, 2: 6, 3: 4}
 
 # How many paths a list of paths holds without a pathlimit.
 DEFAULT_PATHLIMIT = 1000
@@ -650,6 +650,49 @@ def coauthor_tests():
       Query(['a0'], co, steps=[('=', 3)], pagesize=4, pathlimit='all',
             result=('count', ('name', 'path-count', ('path',)))),
   ]
+
+  # Steps with alternatives, which the walk follows as one chain each:
+  # either way along a link; only award holders to their papers; a
+  # co-author (two links) or a paper (one); all three at once. And an
+  # "or" beside a subconstraint every step needs, which it can't.
+  down = 'right->(*)'
+  paper_side = '(<-left typeguid=%s result=((name)) right->(*))' % t
+  author_side = '(<-right typeguid=%s result=((name)) left->(*))' % t
+  co_body = ('(<-right typeguid=%s result=((contents)) left->(result=((name)) '
+             '(<-left typeguid=%s result=none right->(*))))' % (t, t))
+  is_award = lambda m_, x: m_.nodes[x]['value'] == 'award'
+  is_paper = lambda m_, x: any(l['left'] == x and l['type'] == 'author'
+                               for l in m_.live())
+
+  def union(*fs):
+    return lambda m_, links, x: set().union(*(f(m_, links, x) for f in fs))
+
+  either = Step('result=(contents) {%s} | {%s}' % (paper_side, author_side),
+                both_links('author'))
+  award_up = Step('result=(contents) {%s} | {value="award" %s}' % (
+      paper_side, author_side),
+                  union(out_links('author'),
+                        only_from(in_links('author'), is_award)))
+  co_or_paper = Step('result=(contents) {%s} | {%s}' % (co_body, author_side),
+                     union(through('author'), in_links('author')))
+  three = Step('result=(contents) {%s} | {%s} | {%s}' % (
+      paper_side, author_side, co_body),
+               union(out_links('author'), in_links('author'),
+                     through('author')))
+  papers_only = Step('result=(contents) (<-left typeguid=%s) {%s} | {%s}' % (
+      t, paper_side, author_side),
+                     only_from(both_links('author'), is_paper))
+  award = ('value="award"', lambda m_, y: m_.nodes[y]['value'] == 'award')
+  for step in (either, award_up, co_or_paper, three, papers_only):
+    qs += [
+        Query(['a0'], step, name(farthest[0]),
+              result=('name', 'steps', 'path', 'via')),
+        Query(['a0'], step, by_guid(m, 'a11'),
+              result=('steps', 'path-count', ('path', 'via'))),
+        Query(['a3'], step, award, result=('name', 'steps', 'path')),
+        Query(['p5'], step, result=('name', 'steps')),
+        Query(['a36'], step, steps=[('<=', 2)], result='count'),
+    ]
   return generate('path-coauthor', coauthor_tests.__doc__, m, qs,
                   Graphd(ARGS.graphd))
 
