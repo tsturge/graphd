@@ -13,6 +13,10 @@ limitations under the License.
 #include "libcm/cm.h"
 
 #include <stdarg.h>
+#ifdef CM_HEAP_CHECK
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,10 +38,19 @@ typedef struct cm_heap_handle {
 #define HEAP_HANDLE(cm) ((cm_heap_handle *)(cm))
 
 /*  Eacn chunk of payload data is preceded by 16 bytes of header.
+ *
+ *  Built with -DCM_HEAP_CHECK, it also records where the fragment was
+ *  allocated, and destroying a heap appends a line for each fragment
+ *  still on it - "file:line" - to the file named by $CM_HEAP_REPORT:
+ *  what was left to the heap to free, rather than freed by its user.
  */
 struct cm_heap_fragment {
   cm_heap_fragment *frag_prev;
   cm_heap_fragment *frag_next;
+#ifdef CM_HEAP_CHECK
+  char const *frag_file;
+  long frag_line; /* (keeps the payload 16-byte aligned) */
+#endif
 };
 
 /*  Offset table for cm_list..()
@@ -61,6 +74,10 @@ static void *cm_heap_alloc_chunk(cm_heap_handle *h, size_t size,
 
     f->frag_prev = NULL;
     f->frag_next = NULL;
+#ifdef CM_HEAP_CHECK
+    f->frag_file = file;
+    f->frag_line = line;
+#endif
 
     f_size = cm_fragment_size(h->heap_source, f);
 
@@ -202,9 +219,63 @@ cm_handle *cm_heap(cm_handle *source) {
 
 /*  Free the heap data structure and all memory on it that's still unallocated.
  */
+#ifdef CM_HEAP_CHECK
+static int heap_site_compare(void const *a, void const *b) {
+  cm_heap_fragment const *const *x = a, *const *y = b;
+  int c = strcmp((*x)->frag_file ? (*x)->frag_file : "?",
+                 (*y)->frag_file ? (*y)->frag_file : "?");
+  if (c != 0) return c;
+  return (*x)->frag_line < (*y)->frag_line
+             ? -1
+             : (*x)->frag_line > (*y)->frag_line;
+}
+
+/*  Append "count file:line" for each site with fragments left on the
+ *  heap, and a "-" line, to $CM_HEAP_REPORT, in one write.  (A heap
+ *  with nothing left writes just the "-", so that the reports of a
+ *  sequence of requests line up with the requests.)
+ */
+static void heap_report(cm_heap_handle *h) {
+  char const *report = getenv("CM_HEAP_REPORT");
+  cm_heap_fragment *f, **v;
+  size_t n = 0, i, j, len = 0;
+  char *buf;
+  int fd;
+
+  if (report == NULL) return;
+  for (f = h->heap_head; f != NULL; f = f->frag_next) n++;
+  if ((v = malloc(n * sizeof(*v) + 1)) == NULL) return;
+  for (f = h->heap_head, i = 0; f != NULL; f = f->frag_next) v[i++] = f;
+  qsort(v, n, sizeof(*v), heap_site_compare);
+  if ((buf = malloc(n * 300 + 2)) == NULL) {
+    free(v);
+    return;
+  }
+  for (i = 0; i < n; i = j) {
+    for (j = i + 1; j < n && heap_site_compare(v + i, v + j) == 0; j++)
+      ;
+    len += snprintf(buf + len, 300, "%zu %s:%ld\n", j - i,
+                    v[i]->frag_file ? v[i]->frag_file : "?",
+                    v[i]->frag_line);
+  }
+  buf[len++] = '-';
+  buf[len++] = '\n';
+  if ((fd = open(report, O_WRONLY | O_APPEND | O_CREAT, 0644)) >= 0) {
+    (void)write(fd, buf, len);
+    close(fd);
+  }
+  free(buf);
+  free(v);
+}
+#endif
+
 void cm_heap_destroy_loc(cm_handle *cm, char const *file, int line) {
   cm_heap_handle *h = HEAP_HANDLE(cm);
   cm_heap_fragment *f;
+
+#ifdef CM_HEAP_CHECK
+  heap_report(h);
+#endif
 
   /* don't bother managing the heap stats since the whole thing
    * is going away */

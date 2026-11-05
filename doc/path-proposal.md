@@ -377,10 +377,10 @@ since evaluation was implemented.
           LDFLAGS=-fsanitize=address
       BUILDDIR=out-check test/run-tests.sh
 
-- `test/path/stress.py --graphd out-check/bin/graphd` runs path
-  queries on a 100 by 100 grid while other connections write, so that
-  graphd suspends the searches part way, and fails if an answer
-  changes or graphd reports anything.
+- `test/stress/stress.py` (see `doc/memory-and-load-testing.md`) runs
+  path searches, among every other kind of read, while other
+  connections write, so that graphd suspends them part way, and fails
+  if an answer changes or graphd reports anything.
 
 ## Implementation plan
 
