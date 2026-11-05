@@ -4,7 +4,8 @@ Status: implemented (`graphd/graphd-read-path.c`), searching from both
 ends when the step is a chain, or an "or" of chains, and only a few
 nodes can match, and otherwise from one end, stopping early when a page of
 the nearest matches is all the results need. Resuming a search with a
-cursor, and MQL, are still to come.
+cursor is still to come; MQL syntax is proposed in pymql's
+`doc/path-proposal.md`.
 
 ## Why
 
@@ -416,6 +417,7 @@ since evaluation was implemented.
    74 million). To all eight authors of one paper, from authors two to
    four steps away, 0.9-2.6 s; to the nearest of them, 0.2-0.3 s; the
    three nearest people, a page stopped early, 0.01 s.
-5. MQL: expose paths, perhaps as
-   `"/type/reflect/path": {"via": P, "to": Q, "target": {...}}`,
-   compiled to the template above. A separate design pass.
+5. MQL: proposed, not implemented, in pymql's `doc/path-proposal.md`:
+   a `"reach"` directive, with steps written as properties (`"P"`,
+   `"!P"`, `"step|=": [...]` for alternatives) and targets as ordinary
+   subqueries, compiled to `<-path`.
