@@ -219,7 +219,8 @@ paths.
 - **Stopping early.** Otherwise the search goes from one end. If the
   results are just a page of the nearest matches - an explicit
   `pagesize`, the default order, no cursor, and no subconstraints on
-  the `<-path` constraint to rule matches out later - it stops at the
+  the `<-path` constraint to rule matches out later (optional ones,
+  which only read values, don't) - it stops at the
   end of the first level by which it has found a page. With none of
   these, a search with no `steps<=N` walks everything reachable from
   the start, which on a large graph can take minutes: give it a bound.
@@ -328,8 +329,9 @@ since evaluation was implemented.
   subconstraint, it pushes a path search instead of a read-set. The
   search walks level by level and records each new node's distance and
   predecessors. If the step is a chain (from the root to `*`, each
-  constraint linked to its one subconstraint, mandatory, with no "or"s),
-  or an "or" of chains, the walk follows it directly: through the linkage indexes, or a
+  constraint linked to its one subconstraint, mandatory, with no "or"s,
+  beside any number of optional subconstraints, which don't change
+  where a step goes), or an "or" of chains, the walk follows it directly: through the linkage indexes, or a
   primitive's own pointers, checking each primitive against its
   constraint's intrinsics (which include `live`, versions and `asof`),
   and remembering what each node part way along the chain reaches. On
@@ -337,7 +339,7 @@ since evaluation was implemented.
   0.2 s this way, against 4.6 s through the read machinery.
   An "or" of chains is a step whose root has one `|` "or" (not `||`),
   nested for three or more alternatives, whose branches hold all of the
-  root's subconstraints, each branch a chain; a branch's own
+  root's subconstraints but optional ones, each branch a chain; a branch's own
   constraints, and the root's, apply to the node the step starts from.
   The walk follows every branch from each node and takes the union, as
   the template does: `{(<-left typeguid=T right->(*))} |
@@ -345,6 +347,13 @@ since evaluation was implemented.
   one-link chains. On dblp, either way along author links between
   Stonebraker and Knuth takes 0.07 s warm, 2.8 s cold; before, the
   general walk had not finished after four and a half minutes.
+  Optional subconstraints are how a client reads each node's fields
+  (MQL reads a name as an optional link to it), so a step can return
+  values and still be walked as a chain; one containing the `*`, or
+  `count=0`, which rules nodes out, still counts. On dblp, Stonebraker
+  to Knuth with each person's and paper's name read in the step, and
+  the path and its `via` returned, takes 0.08 s cold, 0.04 s warm;
+  before, the general walk timed out.
   `test/unit/path-cost` checks that such steps take the chain walk.
   Other steps
   are walked by evaluating the walking template with its root bound to

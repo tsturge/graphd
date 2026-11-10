@@ -162,7 +162,8 @@ void graphd_read_path_check_memory(graphd_request *greq) {}
  *      level that reach it).
  *
  *      If the step is a chain - from the root to "*", each constraint
- *      linked to its one subconstraint - the walk follows the chain
+ *      linked to its one subconstraint, beside any optional ones, which
+ *      only read values - the walk follows the chain
  *      directly: through the linkage indexes, or a primitive's own
  *      left/right, checking each primitive against its constraint's
  *      intrinsics, and remembering what each node part way along the
@@ -923,10 +924,44 @@ static bool route_node_ok(graphd_constraint const *c) {
          (!gc->guidcon_include_valid || gc->guidcon_include.gs_n == 1);
 }
 
+/*  Does <c>, or anything below it, contain the step's "*"?  (An "or"'s
+ *  branches' subconstraints are in their prototype's list.)
+ */
+static bool has_step_end(graphd_constraint const *c) {
+  graphd_constraint const *sub;
+
+  if (c->con_step_end) return true;
+  for (sub = c->con_head; sub != NULL; sub = sub->con_next)
+    if (has_step_end(sub)) return true;
+  return false;
+}
+
+/*  Can a walk ignore subconstraint <sub>?  An optional subconstraint
+ *  (not count=0, which rules nodes out) doesn't change what its parent
+ *  matches, so it doesn't change where a step goes - unless the step's
+ *  "*" is in it.  MQL reads each field this way: a name, say, is an
+ *  optional link to the name.
+ */
+static bool route_skippable(graphd_constraint const *sub) {
+  return GRAPHD_CONSTRAINT_IS_OPTIONAL(sub) && !has_step_end(sub);
+}
+
+/*  Is <x> among the <n> constraints of the list starting at <head>?
+ */
+static bool route_in_list(graphd_constraint const *head, size_t n,
+                          graphd_constraint const *x) {
+  for (; head != NULL && n > 0; head = head->con_next, n--)
+    if (head == x) return true;
+  return false;
+}
+
 /*  Add the ways through the step from <c>, which the step's start must
  *  match together with also[0..also_n): one, if c is a chain to "*";
- *  or, if c has one "or" whose branches hold all its subconstraints,
- *  those of each branch.  False if they aren't all chains.
+ *  or, if c has one "or" whose branches hold all its subconstraints
+ *  (but those a walk can ignore), those of each branch.  False if they
+ *  aren't all chains.  Along a chain, each constraint has one
+ *  subconstraint the chain continues through, and any number a walk
+ *  can ignore.
  *
  *  (A branch's subconstraints are the first con_subcon_n of the list
  *  at its con_head, which runs on into the other branches'.)
@@ -936,15 +971,22 @@ static bool route_collect(graphd_path_route *routes, size_t *routes_n,
                           graphd_constraint *c) {
   graphd_constraint_or *cor = c->con_or_head;
   graphd_path_route *rt;
-  graphd_constraint *sub;
+  graphd_constraint *sub, *s;
+  size_t i;
 
   if (!route_node_ok(c)) return false;
   if (cor != NULL) {
     if (cor->or_next != NULL || cor->or_short_circuit ||
-        cor->or_tail == NULL || also_n >= GRAPHD_PATH_ROUTE_ALSO_MAX ||
-        c->con_subcon_n !=
-            cor->or_head.con_subcon_n + cor->or_tail->con_subcon_n)
+        cor->or_tail == NULL || also_n >= GRAPHD_PATH_ROUTE_ALSO_MAX)
       return false;
+    for (s = c->con_head, i = 0; s != NULL && i < c->con_subcon_n;
+         s = s->con_next, i++)
+      if (!route_in_list(cor->or_head.con_head, cor->or_head.con_subcon_n,
+                         s) &&
+          !route_in_list(cor->or_tail->con_head, cor->or_tail->con_subcon_n,
+                         s) &&
+          !route_skippable(s))
+        return false;
     also[also_n] = c;
     return route_collect(routes, routes_n, also, also_n + 1,
                          &cor->or_head) &&
@@ -966,8 +1008,14 @@ static bool route_collect(graphd_path_route *routes, size_t *routes_n,
     rt->rt_con[rt->rt_n++] = c;
     if (c->con_step_end) break;
 
-    if (c->con_subcon_n != 1) return false;
-    sub = c->con_head;
+    sub = NULL;
+    for (s = c->con_head, i = 0; s != NULL && i < c->con_subcon_n;
+         s = s->con_next, i++) {
+      if (route_skippable(s)) continue;
+      if (sub != NULL) return false;
+      sub = s;
+    }
+    if (sub == NULL) return false;
     if (!graphd_linkage_is_my(sub->con_linkage) &&
         !graphd_linkage_is_i_am(sub->con_linkage))
       return false;
@@ -1717,6 +1765,18 @@ static int targets_from_iterator(graphd_read_path_context *grp) {
   return err;
 }
 
+/*  Can a match of <con> be ruled out by its subconstraints?  Not by
+ *  optional ones, which only read values.
+ */
+static bool page_subcons_filter(graphd_constraint const *con) {
+  graphd_constraint const *sub;
+
+  if (con->con_or_head != NULL) return true;
+  for (sub = con->con_head; sub != NULL; sub = sub->con_next)
+    if (!GRAPHD_CONSTRAINT_IS_OPTIONAL(sub)) return true;
+  return false;
+}
+
 /*  Walking from one end: has the search found a page of the nearest
  *  matches?  If the results are just that - an explicit pagesize, in
  *  the default order, without a cursor, and with no subconstraints to
@@ -1737,7 +1797,7 @@ static int page_full(graphd_read_path_context *grp, bool *full) {
   if (!grp->grp_page_known) {
     grp->grp_page_known = true;
     grp->grp_page = con->con_pagesize_valid && con->con_sort_default_path &&
-                    con->con_cursor_s == NULL && con->con_subcon_n == 0;
+                    con->con_cursor_s == NULL && !page_subcons_filter(con);
   }
   if (!grp->grp_page) return 0;
   if (con->con_steps.countcon_min_valid &&
